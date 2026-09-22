@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "start_year": 2018,
+  "end_year": 2026,
+  "top_k": 20,
+  "queries": [
+    {
+      "id": "q1",
+      "query": "AI agents in visualization systems"
+    },
+    {
+      "id": "q2",
+      "query": "uncertainty visualization for spatial data"
+    },
+    {
+      "id": "q3",
+      "query": "LLM-based visualization generation"
+    },
+    {
+      "id": "q4",
+      "query": "visual analytics for health disparities"
+    },
+    {
+      "id": "q5",
+      "query": "ensemble visualization for forecasting"
+    }
+  ]
+}

@@ -1,0 +1,81 @@
+import threading
+from datetime import UTC, datetime
+
+import arxiv
+import httpx
+import pytest
+
+from app.providers.arxiv import ArxivProvider
+from app.providers.base import ProviderError
+
+
+class FakeArxivClient:
+    def __init__(self, results: list[arxiv.Result] | None = None, error: Exception | None = None):
+        self.items = results or []
+        self.error = error
+        self.searches: list[arxiv.Search] = []
+        self.thread_id: int | None = None
+
+    def results(self, search: arxiv.Search):
+        self.searches.append(search)
+        self.thread_id = threading.get_ident()
+        if self.error is not None:
+            raise self.error
+        return iter(self.items)
+
+
+def _result(year: int) -> arxiv.Result:
+    return arxiv.Result(
+        entry_id=f"https://arxiv.org/abs/{year}01.01234",
+        published=datetime(year, 1, 2, tzinfo=UTC),
+        title=f"Visual agents {year}",
+        summary="An abstract",
+    )
+
+
+@pytest.mark.asyncio
+async def test_arxiv_client_has_safe_paging_rate_limit_and_retries() -> None:
+    async with httpx.AsyncClient() as async_client:
+        provider = ArxivProvider(async_client)
+        assert provider.arxiv_client.page_size <= 100
+        assert provider.arxiv_client.delay_seconds >= 3
+        assert provider.arxiv_client.num_retries == 5
+
+
+@pytest.mark.asyncio
+async def test_arxiv_search_uses_package_in_worker_thread_and_filters_years() -> None:
+    fake_client = FakeArxivClient([_result(year) for year in (2024, 2025, 2026, 2027)])
+    main_thread_id = threading.get_ident()
+
+    async with httpx.AsyncClient() as async_client:
+        provider = ArxivProvider(async_client, arxiv_client=fake_client)
+        papers = await provider.search("AI agents for visualizations", 80, 2025, 2026)
+
+    assert [paper.publication_year for paper in papers] == [2025, 2026]
+    assert all(paper.source_names == ["arxiv"] for paper in papers)
+    assert fake_client.thread_id != main_thread_id
+    assert len(fake_client.searches) == 1
+    search = fake_client.searches[0]
+    assert search.query == "all:AI AND all:agents AND all:visualizations"
+    assert search.max_results == 80
+    assert search.sort_by == arxiv.SortCriterion.Relevance
+    assert search.sort_order == arxiv.SortOrder.Descending
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure",
+    [
+        arxiv.HTTPError("https://export.arxiv.org/api/query", 5, 406),
+        ConnectionError("network failed"),
+    ],
+)
+async def test_arxiv_library_failures_become_provider_errors(failure: Exception) -> None:
+    fake_client = FakeArxivClient(error=failure)
+
+    async with httpx.AsyncClient() as async_client:
+        provider = ArxivProvider(async_client, arxiv_client=fake_client)
+        with pytest.raises(ProviderError, match="arxiv is temporarily unavailable") as error:
+            await provider.search("visual agents", 20)
+
+    assert error.value.__cause__ is failure
