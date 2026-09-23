@@ -119,7 +119,7 @@ docker compose --profile pdf up --build
 GROBID is then available locally on port 8070. Its first image pull is large and can take several minutes depending on the connection. The repository does not vendor GROBID models or PDF data. If you run the backend outside Compose, the equivalent standalone parser command is:
 
 ```bash
-docker run --rm --init --ulimit core=0 -p 8070:8070 grobid/grobid:0.9.0-crf
+docker run --rm --init --ulimit core=0 -p 8070:8070 grobid/grobid:0.9.1-crf
 ```
 
 ## Configuration
@@ -142,7 +142,7 @@ docker run --rm --init --ulimit core=0 -p 8070:8070 grobid/grobid:0.9.0-crf
 | `PDF_ALLOWED_HOSTS` | approved repository list | Comma-separated hosts accepted for metadata PDF links |
 | `GROBID_URL` | `http://localhost:8070` | Local GROBID REST base URL |
 | `GROBID_TIMEOUT_SECONDS` | `120` | Full-document parser timeout |
-| `GROBID_PARSER_VERSION` | `0.9.0-crf` | Parser/cache provenance version |
+| `GROBID_PARSER_VERSION` | `0.9.1-crf+frontmatter-v1` | Parser/cache provenance version |
 | `PARSED_DOCUMENT_CACHE_DIR` | `backend/data/parsed_documents` | Structured parsed-document cache |
 | `OLLAMA_MODEL` | `qwen3:1.7b` | Local model used for structured paper insights |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Local-only Ollama address for a host-run backend |

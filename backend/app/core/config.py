@@ -48,7 +48,7 @@ class Settings(BaseSettings):
     )
     grobid_url: str = "http://localhost:8070"
     grobid_timeout_seconds: float = Field(default=120.0, ge=5, le=600)
-    grobid_parser_version: str = "0.9.0-crf"
+    grobid_parser_version: str = "0.9.1-crf+frontmatter-v1"
     parsed_document_cache_dir: str = str(Path(__file__).parents[2] / "data" / "parsed_documents")
     ollama_model: str = "qwen3:1.7b"
     ollama_base_url: str = "http://localhost:11434"

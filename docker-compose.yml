@@ -14,7 +14,7 @@ services:
       UNPAYWALL_EMAIL: ${UNPAYWALL_EMAIL:-}
       PDF_MAX_SIZE_MB: ${PDF_MAX_SIZE_MB:-50}
       GROBID_URL: http://grobid:8070
-      GROBID_PARSER_VERSION: 0.9.1-crf
+      GROBID_PARSER_VERSION: 0.9.1-crf+frontmatter-v1
       OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3:1.7b}
       OLLAMA_BASE_URL: ${OLLAMA_DOCKER_BASE_URL:-http://host.docker.internal:11434}
     volumes:

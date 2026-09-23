@@ -6,6 +6,7 @@ import re
 import unicodedata
 from collections.abc import Awaitable, Callable, Iterable
 from difflib import SequenceMatcher
+from itertools import combinations
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -18,9 +19,18 @@ from app.models.insights import (
     InsightsResponse,
 )
 from app.services.insight_cache import InsightCache
-from app.services.insight_selector import EvidenceSelection, evidence_catalog, select_evidence
+from app.services.insight_diagnostics import InsightDiagnostics
+from app.services.insight_selector import (
+    EvidenceSelection,
+    evidence_catalog,
+    focus_evidence,
+    reserve_boundary_passages,
+    select_evidence,
+    supports_finding,
+    supports_future_work,
+)
 
-EXTRACTION_VERSION = "m2b-v10-semantic-story"
+EXTRACTION_VERSION = "m2b-v15-generalized-insights"
 COVERAGE_LIMITS = {
     "research_problem": 4,
     "methods": 8,
@@ -66,22 +76,34 @@ class _GenerationClaim(BaseModel):
     evidence_id: str = Field(min_length=1)
 
 
-class _OverviewInsights(BaseModel):
+class _CoreStoryInsights(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     research_problem: list[_GenerationClaim] = Field(max_length=4)
     key_contributions: list[_GenerationClaim] = Field(max_length=8)
-    main_findings: list[_GenerationClaim] = Field(max_length=10)
-    why_it_matters: list[_GenerationClaim] = Field(max_length=5)
-    target_audience: list[_GenerationClaim] = Field(max_length=5)
+    methods: list[_GenerationClaim] = Field(max_length=8)
 
 
-class _TechnicalInsights(BaseModel):
+class _EvidenceBoundaryInsights(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    methods: list[_GenerationClaim] = Field(max_length=8)
+    main_findings: list[_GenerationClaim] = Field(max_length=10)
     limitations: list[_GenerationClaim] = Field(max_length=8)
     future_work: list[_GenerationClaim] = Field(max_length=8)
+
+
+class _SynthesisGenerationClaim(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    claim: str = Field(min_length=1, max_length=180)
+    evidence_ids: list[str] = Field(min_length=1, max_length=3)
+
+
+class _SynthesisInsights(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    why_it_matters: list[_SynthesisGenerationClaim] = Field(max_length=5)
+    target_audience: list[_SynthesisGenerationClaim] = Field(max_length=5)
 
 
 class InsightInputError(ValueError):
@@ -135,22 +157,63 @@ def validate_insights(
     insights: InsightFields,
     document: ParsedPaper,
     allowed_chunk_ids: set[str] | None = None,
+    diagnostics: InsightDiagnostics | None = None,
 ) -> InsightFields:
     """Remove unsupported references and discard claims left without evidence."""
     chunks = evidence_chunks(document)
+    headings = {chunk.id: "Abstract" for chunk in document.abstract_chunks}
+    headings.update(
+        (chunk.id, section.heading or "Untitled section")
+        for section in document.sections
+        for chunk in section.chunks
+    )
     fields: dict[str, list[InsightClaim]] = {}
     for field in INSIGHT_FIELDS:
         grounded: list[InsightClaim] = []
         for item in getattr(insights, field):
-            valid_evidence = [
-                reference
-                for reference in item.evidence
-                if allowed_chunk_ids is None or reference.chunk_id in allowed_chunk_ids
-                if (chunk := chunks.get(reference.chunk_id)) is not None
-                and quote_in_chunk(reference.quote, chunk.text)
-            ]
+            valid_evidence = []
+            evidence_rejections = []
+            for reference in item.evidence:
+                if allowed_chunk_ids is not None and reference.chunk_id not in allowed_chunk_ids:
+                    evidence_rejections.append("evidence_not_selected_for_stage")
+                    continue
+                chunk = chunks.get(reference.chunk_id)
+                if chunk is None:
+                    evidence_rejections.append("missing_evidence_chunk")
+                    continue
+                if not quote_in_chunk(reference.quote, chunk.text):
+                    evidence_rejections.append("quote_mismatch")
+                    continue
+                valid_evidence.append(reference)
             if valid_evidence:
-                grounded.append(InsightClaim(claim=item.claim, evidence=valid_evidence))
+                candidate = InsightClaim(claim=item.claim, evidence=valid_evidence)
+                rejection_reason = explicit_claim_rejection_reason(candidate, field, headings)
+                if rejection_reason is None:
+                    grounded.append(candidate)
+                    if diagnostics is not None:
+                        diagnostics.record_validation(
+                            field,
+                            item,
+                            retained=True,
+                            rule="explicit_semantic_support",
+                            reason=None,
+                        )
+                elif diagnostics is not None:
+                    diagnostics.record_validation(
+                        field,
+                        item,
+                        retained=False,
+                        rule="explicit_semantic_support",
+                        reason=rejection_reason,
+                    )
+            elif diagnostics is not None:
+                diagnostics.record_validation(
+                    field,
+                    item,
+                    retained=False,
+                    rule="evidence_grounding",
+                    reason=evidence_rejections[0] if evidence_rejections else "missing_evidence",
+                )
         fields[field] = grounded
     return InsightFields(**fields)
 
@@ -262,6 +325,389 @@ def _semantic_concepts(text: str) -> set[str]:
     return {(_CONCEPT_ALIASES.get(concept, concept)) for concept in concepts}
 
 
+_EXPLICIT_FIELDS = {
+    "methods",
+    "key_contributions",
+    "main_findings",
+    "limitations",
+    "future_work",
+}
+_ENTITY_LABEL = (
+    r"group|cohort|population|dataset|model|system|site|center|arm|condition|sample|team|"
+    r"patients?|participants?|experts?|researchers?"
+)
+_LABELED_ENTITY_PATTERNS = (
+    re.compile(rf"\b(?i:{_ENTITY_LABEL})\s+(?P<name>[A-Z][A-Za-z0-9.-]*)\b"),
+    re.compile(rf"\b(?P<name>[A-Z][A-Za-z0-9.-]*)\s+(?i:{_ENTITY_LABEL})\b"),
+)
+_ACRONYM_ENTITY = re.compile(r"\b[A-Z][A-Z0-9-]{1,}\b")
+_ENTITY_NON_NAMES = {
+    "abstract",
+    "discussion",
+    "evaluation",
+    "introduction",
+    "method",
+    "our",
+    "related",
+    "results",
+    "the",
+    "this",
+}
+_DIRECTIONS = {
+    "higher": ("higher_lower", 1),
+    "lower": ("higher_lower", -1),
+    "more": ("more_less", 1),
+    "less": ("more_less", -1),
+    "earlier": ("earlier_later", 1),
+    "later": ("earlier_later", -1),
+    "longer": ("longer_shorter", 1),
+    "shorter": ("longer_shorter", -1),
+    "increased": ("increase_decrease", 1),
+    "decreased": ("increase_decrease", -1),
+    "better": ("better_worse", 1),
+    "worse": ("better_worse", -1),
+    "before": ("before_after", 1),
+    "after": ("before_after", -1),
+    "positive": ("positive_negative", 1),
+    "negative": ("positive_negative", -1),
+    "larger": ("larger_smaller", 1),
+    "smaller": ("larger_smaller", -1),
+}
+_DIRECTION_PATTERN = re.compile(
+    rf"\b({'|'.join(map(re.escape, _DIRECTIONS))})\b",
+    re.I,
+)
+_COMPARISON_CONNECTOR = re.compile(r"\b(?:than|compared (?:with|to))\b", re.I)
+_UNCERTAINTY_PATTERN = re.compile(
+    r"\b(?:may|might|could|possibly|probably|likely|perhaps|potential(?:ly)?|uncertain(?:ty)?|"
+    r"approximately|appears?|appeared|seems?|seemed|suggests?|suggested|observes?|observed|"
+    r"hypothes(?:is|ized|ised))\b",
+    re.I,
+)
+_STRONG_ASSERTION_PATTERN = re.compile(
+    r"\b(?:prove[sd]?|causes?|caused|ensures?|guarantees?|will produce|will improve|"
+    r"leads? to|resulted? in)\b",
+    re.I,
+)
+_CONCISE_FUTURE_ACTION_PATTERN = re.compile(
+    r"^\s*(?:"
+    r"(?:extension|integration|deployment|investigation|collection|expansion|adaptation|"
+    r"application|evaluation|analysis|comparison|use)\b|"
+    r"(?:extend|integrate|deploy|investigate|collect|expand|adapt|apply|evaluate|analy[sz]e)\b"
+    r")",
+    re.I,
+)
+_MATERIAL_FUTURE_CONDITION = re.compile(
+    r"\b(?:assuming|provided that|only if|subject to|contingent on|requires?|requiring)\b",
+    re.I,
+)
+_UNRESTRICTED_SCOPE_PATTERN = re.compile(
+    r"\b(?:unrestricted|unlimited|arbitrary|any number of|all possible|regardless of|"
+    r"without (?:standardization|constraints?|restrictions?|conditions?))\b",
+    re.I,
+)
+_RELATED_WORK_HEADING = re.compile(
+    r"\b(?:related work|background|prior work|previous work|literature review)\b",
+    re.I,
+)
+_PRIOR_WORK_ATTRIBUTION = re.compile(
+    r"\b(?:their\s+(?:work|method|system|approach|study|results?)|"
+    r"they\s+(?:propose|proposed|introduce|introduced|develop|developed|found|showed|report)|"
+    r"prior\s+work|previous\s+work|previous\s+stud(?:y|ies)|existing\s+work|"
+    r"[A-Z][A-Za-z-]+(?:\s+and\s+[A-Z][A-Za-z-]+)?\s+et\s+al\.)\b",
+    re.I,
+)
+_CURRENT_PAPER_ATTRIBUTION = re.compile(
+    r"\b(?:we|our|this\s+(?:work|paper|study|analysis|evaluation|system|method)|"
+    r"current\s+(?:work|paper|study))\b",
+    re.I,
+)
+_CURRENT_STUDY_RESULT = re.compile(
+    r"\b(?:we|our|this (?:study|work|paper|analysis|evaluation|experiment)|"
+    r"current (?:study|work)|our results?)\b.{0,60}\b"
+    r"(?:found|observed|revealed|showed|confirmed|determined|noticed|indicated|"
+    r"demonstrated|report)\w*\b",
+    re.I,
+)
+_DETAIL_GENERIC_WORDS = {
+    "also",
+    "analysis",
+    "author",
+    "be",
+    "been",
+    "being",
+    "claim",
+    "cohort",
+    "comparison",
+    "data",
+    "dataset",
+    "evaluation",
+    "expert",
+    "finding",
+    "group",
+    "had",
+    "has",
+    "have",
+    "outcome",
+    "paper",
+    "participant",
+    "patient",
+    "population",
+    "report",
+    "requir",
+    "research",
+    "result",
+    "show",
+    "shown",
+    "study",
+    "than",
+    "was",
+    "were",
+}
+_DETAIL_ALIASES = {
+    "deaths": "mortality",
+    "death": "mortality",
+    "died": "mortality",
+    "follow": "followup",
+    "followup": "followup",
+    "surveillance": "followup",
+}
+
+
+def _entity_mentions(text: str) -> list[tuple[str, int, int]]:
+    """Return conservative, position-aware named groups and subjects."""
+    mentions: list[tuple[str, int, int]] = []
+    occupied: list[tuple[int, int]] = []
+    for pattern_index, pattern in enumerate(_LABELED_ENTITY_PATTERNS):
+        for match in pattern.finditer(text):
+            name = _normalize_quote(match.group("name"))
+            if (
+                not name
+                or name in _ENTITY_NON_NAMES
+                or (pattern_index == 1 and name in {"a", "an"})
+            ):
+                continue
+            mentions.append((name, match.start(), match.end()))
+            occupied.append((match.start(), match.end()))
+    for match in _ACRONYM_ENTITY.finditer(text):
+        if any(start <= match.start() < end for start, end in occupied):
+            continue
+        name = _normalize_quote(match.group())
+        if name not in _ENTITY_NON_NAMES:
+            mentions.append((name, match.start(), match.end()))
+    return sorted(set(mentions), key=lambda item: (item[1], item[2], item[0]))
+
+
+def _entity_consistent(claim: str, evidence: str) -> bool:
+    claimed = {name for name, _start, _end in _entity_mentions(claim)}
+    supported = {name for name, _start, _end in _entity_mentions(evidence)}
+    return not claimed or claimed <= supported
+
+
+def _comparisons(text: str) -> list[tuple[str, int, str, str | None]]:
+    entities = _entity_mentions(text)
+    comparisons: list[tuple[str, int, str, str | None]] = []
+    for direction in _DIRECTION_PATTERN.finditer(text):
+        left_candidates = [
+            mention
+            for mention in entities
+            if mention[2] <= direction.start() and direction.start() - mention[2] <= 120
+        ]
+        if not left_candidates:
+            continue
+        left = max(left_candidates, key=lambda mention: mention[2])
+        connector = _COMPARISON_CONNECTOR.search(
+            text,
+            direction.end(),
+            min(len(text), direction.end() + 120),
+        )
+        right = None
+        if connector is not None:
+            right_candidates = [
+                mention
+                for mention in entities
+                if mention[1] >= connector.end() and mention[1] - connector.end() <= 100
+            ]
+            if right_candidates:
+                right = min(right_candidates, key=lambda mention: mention[1])[0]
+        family, polarity = _DIRECTIONS[direction.group().casefold()]
+        comparisons.append((family, polarity, left[0], right))
+    return comparisons
+
+
+def _comparison_conflicts(claim: str, evidence: str) -> bool:
+    for claim_family, claim_polarity, claim_left, claim_right in _comparisons(claim):
+        for evidence_family, evidence_polarity, evidence_left, evidence_right in _comparisons(
+            evidence
+        ):
+            if claim_family != evidence_family:
+                continue
+            if claim_right is not None and evidence_right is not None:
+                same_order = claim_left == evidence_left and claim_right == evidence_right
+                reversed_order = claim_left == evidence_right and claim_right == evidence_left
+                if same_order and claim_polarity != evidence_polarity:
+                    return True
+                if reversed_order and claim_polarity == evidence_polarity:
+                    return True
+            elif evidence_right is not None:
+                if claim_left == evidence_left and claim_polarity != evidence_polarity:
+                    return True
+                if claim_left == evidence_right and claim_polarity == evidence_polarity:
+                    return True
+            elif claim_left == evidence_left and claim_polarity != evidence_polarity:
+                return True
+    return False
+
+
+def _contrast_conflicts(claim: str, evidence: str) -> bool:
+    """Catch a positive claim about the explicitly negated side of a contrast."""
+    claim_comparisons = _comparisons(claim)
+    if not claim_comparisons:
+        return False
+    clauses = re.split(r"\b(?:whereas|while)\b", evidence, maxsplit=1, flags=re.I)
+    if len(clauses) != 2:
+        return False
+    clause_entities = [
+        {name for name, _start, _end in _entity_mentions(clause)} for clause in clauses
+    ]
+    negated = [
+        re.search(r"\b(?:not|no|without|lack(?:s|ed|ing)?)\b", clause, re.I) is not None
+        for clause in clauses
+    ]
+    claim_details = _detail_terms(claim)
+    for _family, polarity, subject, _right in claim_comparisons:
+        if polarity < 0:
+            continue
+        for index, entities in enumerate(clause_entities):
+            other = 1 - index
+            if (
+                subject in entities
+                and negated[index]
+                and claim_details.intersection(_detail_terms(clauses[other]))
+            ):
+                return True
+    return False
+
+
+def _uncertainty_preserved(claim: str, evidence: str) -> bool:
+    evidence_is_qualified = _UNCERTAINTY_PATTERN.search(evidence) is not None
+    claim_is_qualified = _UNCERTAINTY_PATTERN.search(claim) is not None
+    if evidence_is_qualified and not claim_is_qualified:
+        return False
+    if (
+        _STRONG_ASSERTION_PATTERN.search(claim) is not None
+        and _STRONG_ASSERTION_PATTERN.search(evidence) is None
+    ):
+        return False
+    return True
+
+
+def _future_work_strength_preserved(claim: str, evidence: str) -> bool:
+    """Allow concise conditional directions without allowing stronger promised outcomes."""
+    if (
+        _STRONG_ASSERTION_PATTERN.search(claim) is not None
+        and _STRONG_ASSERTION_PATTERN.search(evidence) is None
+    ):
+        return False
+    if _UNCERTAINTY_PATTERN.search(evidence) is None:
+        return True
+    if _UNCERTAINTY_PATTERN.search(claim) is not None:
+        return True
+    if _CONCISE_FUTURE_ACTION_PATTERN.search(claim) is None:
+        return False
+    return not (
+        _MATERIAL_FUTURE_CONDITION.search(evidence) is not None
+        and _UNRESTRICTED_SCOPE_PATTERN.search(claim) is not None
+    )
+
+
+def _detail_terms(text: str) -> set[str]:
+    entity_words = {
+        word for entity, _start, _end in _entity_mentions(text) for word in entity.split()
+    }
+    terms = _content_words(text)
+    terms -= _DETAIL_GENERIC_WORDS
+    terms -= entity_words
+    terms -= set(_DIRECTIONS)
+    return {_DETAIL_ALIASES.get(term, term) for term in terms}
+
+
+def _adds_unsupported_detail(claim: str, evidence: str) -> bool:
+    claim_terms = _detail_terms(claim)
+    evidence_terms = _detail_terms(evidence)
+    if not claim_terms or not evidence_terms:
+        return False
+    shared = claim_terms & evidence_terms
+    if not shared:
+        return True
+    return len(claim_terms) >= 5 and len(shared) / len(claim_terms) < 0.2
+
+
+def _prior_work_only(evidence: str) -> bool:
+    """Return true only when evidence clearly attributes its substance to other work."""
+    return (
+        _PRIOR_WORK_ATTRIBUTION.search(evidence) is not None
+        and _CURRENT_PAPER_ATTRIBUTION.search(evidence) is None
+    )
+
+
+def explicit_claim_supported(
+    item: InsightClaim,
+    field: str,
+    headings: dict[str, str],
+) -> bool:
+    """Apply conservative semantic checks only to explicit-extraction fields.
+
+    Why It Matters deliberately remains outside this validator: it is a synthesis
+    field whose support must be assessed from validated upstream story claims.
+    """
+    return explicit_claim_rejection_reason(item, field, headings) is None
+
+
+def explicit_claim_rejection_reason(
+    item: InsightClaim,
+    field: str,
+    headings: dict[str, str],
+) -> str | None:
+    """Return the existing explicit-field decision's first failing rule, if any."""
+    if field not in _EXPLICIT_FIELDS:
+        return None
+
+    evidence = " ".join(reference.quote for reference in item.evidence)
+    if field in {"key_contributions", "main_findings", "limitations"} and _prior_work_only(
+        evidence
+    ):
+        return "prior_work_current_paper_restriction"
+    if field == "main_findings":
+        evidence_headings = tuple(
+            headings.get(reference.chunk_id, "") for reference in item.evidence
+        )
+        if (
+            evidence_headings
+            and all(_RELATED_WORK_HEADING.search(heading) for heading in evidence_headings)
+            and _CURRENT_STUDY_RESULT.search(evidence) is None
+        ):
+            return "prior_work_current_paper_restriction"
+        if not supports_finding(evidence, evidence_headings):
+            return "method_or_capability_as_finding_restriction"
+    if field == "future_work" and not supports_future_work(evidence):
+        return "future_work_guard"
+    if not _entity_consistent(item.claim, evidence):
+        return "entity_mismatch"
+    if _comparison_conflicts(item.claim, evidence):
+        return "comparison_direction_mismatch"
+    if _contrast_conflicts(item.claim, evidence):
+        return "contrast_direction_mismatch"
+    if field == "future_work":
+        if not _future_work_strength_preserved(item.claim, evidence):
+            return "future_work_strength_or_condition_mismatch"
+    elif not _uncertainty_preserved(item.claim, evidence):
+        return "uncertainty_mismatch"
+    if _adds_unsupported_detail(item.claim, evidence):
+        return "unsupported_attribute_or_detail"
+    return None
+
+
 def _mentions_effect(text: str, roots: tuple[str, ...]) -> bool:
     normalized = _normalize_quote(text)
     return any(re.search(rf"\b{re.escape(root)}\w*\b", normalized) is not None for root in roots)
@@ -269,25 +715,61 @@ def _mentions_effect(text: str, roots: tuple[str, ...]) -> bool:
 
 def synthesis_claim_supported(item: InsightClaim, field: str) -> bool:
     """Conservatively reject synthesis whose main concepts are absent from its evidence."""
+    return synthesis_claim_rejection_reason(item, field) is None
+
+
+def synthesis_claim_rejection_reason(item: InsightClaim, field: str) -> str | None:
+    """Return the existing synthesis decision's first failing rule, if any."""
     if field not in _SYNTHESIS_FIELDS or not item.evidence:
-        return field not in _SYNTHESIS_FIELDS
+        return None if field not in _SYNTHESIS_FIELDS else "missing_evidence"
     evidence_text = " ".join(reference.quote for reference in item.evidence)
     claim_concepts = _semantic_concepts(item.claim)
     evidence_concepts = _semantic_concepts(evidence_text)
     if not claim_concepts:
-        return False
-    thresholds = {"research_problem": 0.35, "why_it_matters": 0.45, "target_audience": 0.30}
+        return "missing_semantic_concepts"
+    thresholds = {"research_problem": 0.35, "why_it_matters": 0.70, "target_audience": 0.30}
     coverage = len(claim_concepts & evidence_concepts) / len(claim_concepts)
     if coverage < thresholds[field]:
-        return False
+        return "semantic_concept_coverage"
     if field == "why_it_matters":
+        if not _entity_consistent(item.claim, evidence_text):
+            return "entity_mismatch"
+        if _comparison_conflicts(item.claim, evidence_text):
+            return "comparison_direction_mismatch"
+        if _contrast_conflicts(item.claim, evidence_text):
+            return "contrast_direction_mismatch"
+        if not _uncertainty_preserved(item.claim, evidence_text):
+            return "uncertainty_mismatch"
         for roots in _EFFECT_GROUPS:
             if _mentions_effect(item.claim, roots) and not _mentions_effect(evidence_text, roots):
-                return False
-    return True
+                return "unsupported_effect_or_causality"
+    return None
 
 
-def filter_synthesis_support(insights: InsightFields, document: ParsedPaper) -> InsightFields:
+def _minimum_synthesis_evidence(
+    item: InsightClaim,
+    field: str,
+    required_story_evidence: set[tuple[str, str]],
+) -> InsightClaim | None:
+    """Find the smallest cited evidence union that supports a synthesis claim."""
+    for size in range(1, len(item.evidence) + 1):
+        for selected in combinations(item.evidence, size):
+            if field == "why_it_matters" and not any(
+                (reference.chunk_id, _normalize_quote(reference.quote)) in required_story_evidence
+                for reference in selected
+            ):
+                continue
+            candidate = InsightClaim(claim=item.claim, evidence=list(selected))
+            if synthesis_claim_rejection_reason(candidate, field) is None:
+                return candidate
+    return None
+
+
+def filter_synthesis_support(
+    insights: InsightFields,
+    document: ParsedPaper,
+    diagnostics: InsightDiagnostics | None = None,
+) -> InsightFields:
     """Retain only lexically supported synthesis and story-grounded significance claims."""
     discussion_ids = {
         chunk.id
@@ -298,20 +780,59 @@ def filter_synthesis_support(insights: InsightFields, document: ParsedPaper) -> 
     contribution_ids = {
         reference.chunk_id for item in insights.key_contributions for reference in item.evidence
     }
+    problem_ids = {
+        reference.chunk_id for item in insights.research_problem for reference in item.evidence
+    }
     finding_ids = {
         reference.chunk_id for item in insights.main_findings for reference in item.evidence
     }
-    why_required_ids = contribution_ids | finding_ids | discussion_ids
+    why_required_ids = problem_ids | contribution_ids | finding_ids | discussion_ids
+    story_evidence = {
+        (reference.chunk_id, _normalize_quote(reference.quote))
+        for field in ("research_problem", "key_contributions", "main_findings")
+        for story_item in getattr(insights, field)
+        for reference in story_item.evidence
+    }
     filtered = insights.model_copy(deep=True)
     for field in _SYNTHESIS_FIELDS:
         kept = []
         for item in getattr(filtered, field):
-            if field == "why_it_matters" and not any(
-                reference.chunk_id in why_required_ids for reference in item.evidence
+            if field == "why_it_matters" and (
+                not any(reference.chunk_id in why_required_ids for reference in item.evidence)
+                or not any(
+                    (reference.chunk_id, _normalize_quote(reference.quote)) in story_evidence
+                    for reference in item.evidence
+                )
             ):
+                if diagnostics is not None:
+                    diagnostics.record_validation(
+                        field,
+                        item,
+                        retained=False,
+                        rule="synthesis_semantic_support",
+                        reason="why_it_matters_story_source",
+                    )
                 continue
-            if synthesis_claim_supported(item, field):
-                kept.append(item)
+            supported = _minimum_synthesis_evidence(item, field, story_evidence)
+            rejection_reason = synthesis_claim_rejection_reason(item, field)
+            if supported is not None:
+                kept.append(supported)
+                if diagnostics is not None:
+                    diagnostics.record_validation(
+                        field,
+                        item,
+                        retained=True,
+                        rule="synthesis_semantic_support",
+                        reason=None,
+                    )
+            elif diagnostics is not None:
+                diagnostics.record_validation(
+                    field,
+                    item,
+                    retained=False,
+                    rule="synthesis_semantic_support",
+                    reason=rejection_reason,
+                )
         setattr(filtered, field, kept)
     return filtered
 
@@ -420,18 +941,94 @@ class InsightService:
         self.batch_chars = batch_chars
 
     @staticmethod
-    def _prompt(document: ParsedPaper, selection: EvidenceSelection, focus: str) -> str:
+    def _catalog(
+        document: ParsedPaper,
+        selection: EvidenceSelection,
+        validated_story: InsightFields | None = None,
+    ) -> dict[str, tuple[str, str, str]]:
         catalog = evidence_catalog(selection)
+        if validated_story is None:
+            return catalog
+        headings = {chunk.id: "Abstract" for chunk in document.abstract_chunks}
+        headings.update(
+            (chunk.id, section.heading or "Untitled section")
+            for section in document.sections
+            for chunk in section.chunks
+        )
+        existing = {
+            (chunk_id, _normalize_quote(quote)) for chunk_id, quote, _heading in catalog.values()
+        }
+        for field in ("research_problem", "key_contributions", "main_findings"):
+            for item in getattr(validated_story, field):
+                for reference in item.evidence:
+                    key = (reference.chunk_id, _normalize_quote(reference.quote))
+                    if key in existing:
+                        continue
+                    catalog[f"E{len(catalog) + 1:02d}"] = (
+                        reference.chunk_id,
+                        reference.quote,
+                        headings.get(reference.chunk_id, "Validated research story"),
+                    )
+                    existing.add(key)
+        return catalog
+
+    @staticmethod
+    def _validated_story_text(
+        story: InsightFields, catalog: dict[str, tuple[str, str, str]]
+    ) -> str:
+        identifiers = {
+            (chunk_id, _normalize_quote(quote)): evidence_id
+            for evidence_id, (chunk_id, quote, _heading) in catalog.items()
+        }
+        lines = []
+        for field in ("research_problem", "key_contributions", "main_findings"):
+            for item in getattr(story, field):
+                cited = [
+                    identifiers.get((reference.chunk_id, _normalize_quote(reference.quote)))
+                    for reference in item.evidence
+                ]
+                cited = [identifier for identifier in cited if identifier is not None]
+                if cited:
+                    lines.append(f"- {field}: {item.claim} [evidence: {', '.join(cited)}]")
+        return "\n".join(lines) or "- No validated core claims were retained."
+
+    @classmethod
+    def _prompt(
+        cls,
+        document: ParsedPaper,
+        catalog: dict[str, tuple[str, str, str]],
+        focus: str,
+        validated_story: InsightFields | None = None,
+    ) -> str:
         excerpts = "\n".join(
             f"[{evidence_id}] {heading}: {quote}"
             for evidence_id, (_, quote, heading) in catalog.items()
         )
+        story = ""
+        if validated_story is not None:
+            story = (
+                "Already validated research-story claims (these are the primary synthesis input):\n"
+                f"{cls._validated_story_text(validated_story, catalog)}\n\n"
+            )
+        evidence_instruction = (
+            "Each item has claim (one atomic idea, at most 20 words) and one exact evidence_id "
+            "from the list. "
+        )
+        if validated_story is not None:
+            evidence_instruction = (
+                "Each item has claim (one atomic idea, at most 20 words) and evidence_ids. "
+                "For why_it_matters, cite the smallest set of 1-3 evidence IDs from the already "
+                "validated research-story claims needed to support every concept; raw discussion "
+                "may only supplement that validated story. For target_audience, cite exactly one "
+                "explicit audience evidence ID. "
+            )
         return (
             f"Title: {document.title or 'Untitled paper'}\n"
+            f"{story}"
             f"Exact paper excerpts:\n{excerpts}\n\n"
             f"Focus on {focus}. Return only JSON matching the schema, no prose. "
-            "Each item has claim (one atomic idea, at most 20 words) and one exact evidence_id "
-            "from the list. Inspect the full list and do not stop after the first supported claim. "
+            f"{evidence_instruction}"
+            "Inspect the full list and do not stop after the first supported claim. "
             "Do not guess absent details, fill quotas, or repeat claims. Methods are architecture, "
             "design methodology, algorithms, representations or encodings, data processing or "
             "harmonization, system implementation, or evaluation procedures; keep distinct method "
@@ -439,13 +1036,16 @@ class InsightService:
             "For contributions, prefer passages where the authors explicitly declare their "
             "contributions and preserve every distinct listed item. Findings must use supplied "
             "Evaluation, Results, Case Study, Expert Feedback, or Discussion evidence when such "
-            "evidence is present. Only return a limitation when its excerpt explicitly states a "
+            "evidence is present, and must cite an observation or result rather than a method "
+            "description. Only return a limitation when its excerpt explicitly states a "
             "constraint, inability, threat, or unresolved problem. Never convert that limitation "
             "into future_work; future_work requires explicit future investigation, extension, "
-            "plan, or deployment language. For why_it_matters, synthesize only from grounded "
-            "problem, contribution, finding, or Discussion/Conclusion evidence, cite contribution, "
-            "finding, or Discussion/Conclusion evidence, and do not state a stronger causal or "
-            "practical effect than the evidence. Only return target audience when evidence names "
+            "plan, or deployment language. For why_it_matters, synthesize only from the already "
+            "validated Problem, Contribution, and Finding claims as the primary factual input, "
+            "supplemented only by supplied Expert Feedback or Discussion/Conclusion excerpts. "
+            "State the scientific capability or "
+            "understanding the work enabled; do not state a stronger causal or practical effect "
+            "than the evidence. Only return target audience when evidence names "
             "or directly describes that audience. Use [] for unsupported fields."
         )
 
@@ -453,14 +1053,33 @@ class InsightService:
         self,
         document: ParsedPaper,
         selection: EvidenceSelection,
-        schema: type[_OverviewInsights] | type[_TechnicalInsights],
+        schema: type[_CoreStoryInsights]
+        | type[_EvidenceBoundaryInsights]
+        | type[_SynthesisInsights],
         focus: str,
-    ) -> InsightFields:
+        validated_story: InsightFields | None = None,
+        diagnostics: InsightDiagnostics | None = None,
+        stage_id: str = "stage",
+        stage_name: str = "Extraction stage",
+    ) -> tuple[InsightFields, set[str]]:
+        catalog = self._catalog(document, selection, validated_story)
+        if diagnostics is not None:
+            diagnostics.start_stage(
+                stage_id,
+                stage_name,
+                focus,
+                document,
+                selection,
+                catalog,
+            )
         payload = {
             "model": self.model,
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": self._prompt(document, selection, focus)},
+                {
+                    "role": "user",
+                    "content": self._prompt(document, catalog, focus, validated_story),
+                },
             ],
             "format": schema.model_json_schema(),
             "stream": False,
@@ -483,36 +1102,99 @@ class InsightService:
             content = response.json()["message"]["content"]
             if not isinstance(content, str):
                 raise TypeError("Ollama content is not text")
+            if diagnostics is not None:
+                diagnostics.record_raw_model_output(stage_id, content)
             parsed = schema.model_validate_json(content)
-            catalog = evidence_catalog(selection)
-            generated = sum(len(getattr(parsed, field, [])) for field in INSIGHT_FIELDS)
+            stage_fields = tuple(schema.model_fields)
+
+            def evidence_ids(item: _GenerationClaim | _SynthesisGenerationClaim) -> list[str]:
+                if isinstance(item, _SynthesisGenerationClaim):
+                    return item.evidence_ids
+                return [item.evidence_id]
+
+            generated = sum(len(getattr(parsed, field)) for field in stage_fields)
             mapped = sum(
-                item.evidence_id in catalog
-                for field in INSIGHT_FIELDS
-                for item in getattr(parsed, field, [])
+                all(evidence_id in catalog for evidence_id in evidence_ids(item))
+                for field in stage_fields
+                for item in getattr(parsed, field)
             )
             if generated and not mapped:
                 raise InsightOutputError(
                     "Ollama returned claims without valid evidence identifiers"
                 )
-            return InsightFields(
-                **{
-                    field: [
+            insights = InsightFields.empty()
+            for field in stage_fields:
+                resolved = []
+                for index, item in enumerate(getattr(parsed, field)):
+                    item_evidence_ids = list(dict.fromkeys(evidence_ids(item)))
+                    candidate_id = None
+                    if diagnostics is not None:
+                        candidate_id = diagnostics.record_candidate(
+                            stage_id,
+                            field,
+                            index,
+                            item.claim,
+                            item_evidence_ids,
+                        )
+                    if any(evidence_id not in catalog for evidence_id in item_evidence_ids):
+                        if diagnostics is not None and candidate_id is not None:
+                            diagnostics.record_evidence_resolution(
+                                stage_id,
+                                candidate_id,
+                                retained=False,
+                                reason="unknown_evidence_id",
+                            )
+                        continue
+                    resolved_evidence = [
+                        {
+                            "evidence_id": evidence_id,
+                            "chunk_id": catalog[evidence_id][0],
+                            "quote": catalog[evidence_id][1],
+                            "heading": catalog[evidence_id][2],
+                        }
+                        for evidence_id in item_evidence_ids
+                    ]
+                    quote = " ".join(evidence["quote"] for evidence in resolved_evidence)
+                    evidence_headings = tuple(evidence["heading"] for evidence in resolved_evidence)
+                    guard_reason = None
+                    if field == "future_work" and not supports_future_work(quote):
+                        guard_reason = "future_work_guard"
+                    elif field == "main_findings" and not supports_finding(
+                        quote, evidence_headings
+                    ):
+                        guard_reason = "method_or_capability_as_finding_restriction"
+                    if guard_reason is not None:
+                        if diagnostics is not None and candidate_id is not None:
+                            diagnostics.record_evidence_resolution(
+                                stage_id,
+                                candidate_id,
+                                retained=False,
+                                reason=guard_reason,
+                                resolved_evidence=resolved_evidence,
+                            )
+                        continue
+                    resolved.append(
                         InsightClaim(
                             claim=item.claim,
                             evidence=[
                                 {
-                                    "chunk_id": catalog[item.evidence_id][0],
-                                    "quote": catalog[item.evidence_id][1],
+                                    "chunk_id": evidence["chunk_id"],
+                                    "quote": evidence["quote"],
                                 }
+                                for evidence in resolved_evidence
                             ],
                         )
-                        for item in getattr(parsed, field, [])
-                        if item.evidence_id in catalog
-                    ]
-                    for field in INSIGHT_FIELDS
-                }
-            )
+                    )
+                    if diagnostics is not None and candidate_id is not None:
+                        diagnostics.record_evidence_resolution(
+                            stage_id,
+                            candidate_id,
+                            retained=True,
+                            reason=None,
+                            resolved_evidence=resolved_evidence,
+                        )
+                setattr(insights, field, resolved)
+            return insights, {chunk_id for chunk_id, _quote, _heading in catalog.values()}
         except (ValueError, KeyError, TypeError, ValidationError) as exc:
             raise InsightOutputError("Ollama returned invalid structured insights") from exc
 
@@ -520,12 +1202,18 @@ class InsightService:
         self,
         document: ParsedPaper,
         on_progress: Callable[[str], Awaitable[None]] | None = None,
+        diagnostics: InsightDiagnostics | None = None,
     ) -> InsightsResponse:
         evidence_chunks(document)
         fingerprint = document_fingerprint(document)
+        if diagnostics is not None:
+            diagnostics.start_extraction(document, fingerprint, self.model, EXTRACTION_VERSION)
         key = self.cache.key(fingerprint, self.model, EXTRACTION_VERSION)
         cached = await asyncio.to_thread(self.cache.get, key)
         if cached is not None and validate_insights(cached, document) == cached:
+            if diagnostics is not None:
+                diagnostics.record_cache_hit()
+                diagnostics.finalize(cached)
             return InsightsResponse(
                 paper_id=document.paper_id,
                 document_fingerprint=fingerprint,
@@ -537,67 +1225,114 @@ class InsightService:
 
         if on_progress:
             await on_progress("Selecting evidence")
-        selection = select_evidence(document, max_chars=self.batch_chars)
-        if not selection.chunks:
+        evidence_index = select_evidence(document)
+        if not evidence_index.chunks:
             raise InsightInputError("Parsed paper has no evidence chunks to extract from")
-        overview = self._focus_selection(
-            selection,
+        core = focus_evidence(
+            evidence_index,
             (
-                ("contributions", 4),
-                ("evaluation", 7),
-                ("discussion", 4),
-                ("overview", 6),
-                ("findings", 8),
+                ("explicit_contributions", None),
+                ("problem_gaps", 1),
+                ("problem", 3),
+                ("data_methods", 1),
+                ("design_methods", 1),
+                ("system_methods", 2),
+                ("evaluation_methods", 1),
+                ("contributions", 2),
+                ("overview", 2),
+                ("discussion", 1),
             ),
-            18,
+            ("problem", "contributions", "overview", "methods"),
+            max_chunks=20,
+            max_chars=self.batch_chars,
         )
-        technical = self._focus_selection(
-            selection,
-            (
-                ("design_methods", 3),
-                ("data_methods", 3),
-                ("system_methods", 5),
-                ("evaluation_methods", 3),
-                ("limitations", 5),
-                ("future_work", 4),
-                ("methods", 10),
-                ("gaps", 4),
-            ),
-            18,
+        boundaries = reserve_boundary_passages(
+            focus_evidence(
+                evidence_index,
+                (
+                    ("evaluation_subsections", None),
+                    ("discussion_limitations", None),
+                    ("discussion_deployment", None),
+                    ("limitations", 3),
+                    ("future_work", 3),
+                    ("discussion", 2),
+                    ("findings", 3),
+                    ("evaluation", 2),
+                ),
+                ("findings", "evaluation", "discussion", "limitations", "future_work"),
+                max_chunks=22,
+                max_chars=self.batch_chars,
+            )
         )
         if on_progress:
-            await on_progress("Generating grounded insights (1/2)")
-        overview_raw = await self._extract_batch(
+            await on_progress("Generating core research story (1/3)")
+        core_raw, core_allowed = await self._extract_batch(
             document,
-            overview,
-            _OverviewInsights,
-            "research_problem, key_contributions, main_findings, why_it_matters, "
-            "and target_audience",
+            core,
+            _CoreStoryInsights,
+            "research_problem, key_contributions, and methods",
+            diagnostics=diagnostics,
+            stage_id="core_story",
+            stage_name="Problem, contributions, and methods",
         )
         if on_progress:
-            await on_progress("Generating grounded insights (2/2)")
-        technical_raw = await self._extract_batch(
+            await on_progress("Generating evidence and boundaries (2/3)")
+        boundaries_raw, boundaries_allowed = await self._extract_batch(
             document,
-            technical,
-            _TechnicalInsights,
-            "methods, limitations, and future_work",
+            boundaries,
+            _EvidenceBoundaryInsights,
+            "main_findings, limitations, and future_work",
+            diagnostics=diagnostics,
+            stage_id="evidence_boundaries",
+            stage_name="Findings, limitations, and future work",
+        )
+        core_valid = validate_insights(core_raw, document, core_allowed, diagnostics)
+        boundaries_valid = validate_insights(
+            boundaries_raw, document, boundaries_allowed, diagnostics
+        )
+        validated_story = merge_insights((core_valid, boundaries_valid))
+
+        synthesis = focus_evidence(
+            evidence_index,
+            (("audience", 3), ("discussion", 3), ("evaluation", 2)),
+            ("audience", "discussion", "evaluation"),
+            max_chunks=10,
+            max_chars=min(self.batch_chars, 6000),
         )
         if on_progress:
-            await on_progress("Validating evidence")
-        validated = []
-        for raw, selected in ((overview_raw, overview), (technical_raw, technical)):
-            selected_ids = {chunk_id for _, chunk_id, _ in selected.chunks}
-            corrected = restore_selected_chunk_prefixes(raw, selected_ids)
-            validated.append(validate_insights(corrected, document, selected_ids))
+            await on_progress("Generating grounded synthesis (3/3)")
+        synthesis_raw, synthesis_allowed = await self._extract_batch(
+            document,
+            synthesis,
+            _SynthesisInsights,
+            "why_it_matters and target_audience",
+            validated_story,
+            diagnostics=diagnostics,
+            stage_id="grounded_synthesis",
+            stage_name="Why it matters and target audience",
+        )
+        synthesis_valid = validate_insights(synthesis_raw, document, synthesis_allowed, diagnostics)
         raw_has_claims = any(
-            getattr(raw, field) for raw in (overview_raw, technical_raw) for field in INSIGHT_FIELDS
+            getattr(raw, field)
+            for raw in (core_raw, boundaries_raw, synthesis_raw)
+            for field in INSIGHT_FIELDS
         )
         valid_has_claims = any(
-            getattr(batch, field) for batch in validated for field in INSIGHT_FIELDS
+            getattr(batch, field)
+            for batch in (core_valid, boundaries_valid, synthesis_valid)
+            for field in INSIGHT_FIELDS
         )
         if raw_has_claims and not valid_has_claims:
             raise InsightOutputError("Ollama returned claims without valid paper evidence")
-        insights = filter_synthesis_support(merge_insights(validated), document)
+        if on_progress:
+            await on_progress("Validating evidence")
+        insights = filter_synthesis_support(
+            merge_insights((core_valid, boundaries_valid, synthesis_valid)),
+            document,
+            diagnostics,
+        )
+        if diagnostics is not None:
+            diagnostics.finalize(insights)
         await asyncio.to_thread(self.cache.put, key, insights)
         return InsightsResponse(
             paper_id=document.paper_id,
@@ -606,28 +1341,4 @@ class InsightService:
             extraction_version=EXTRACTION_VERSION,
             cached=False,
             insights=insights,
-        )
-
-    @staticmethod
-    def _focus_selection(
-        selection: EvidenceSelection, pool_limits: tuple[tuple[str, int], ...], limit: int
-    ) -> EvidenceSelection:
-        chosen: set[str] = set()
-        for pool, budget in pool_limits:
-            added = 0
-            for chunk_id in selection.pools[pool]:
-                if len(chosen) >= limit:
-                    break
-                if chunk_id not in chosen:
-                    chosen.add(chunk_id)
-                    added += 1
-                if added >= budget:
-                    break
-        for _, chunk_id, _ in selection.chunks:
-            if len(chosen) >= limit:
-                break
-            chosen.add(chunk_id)
-        return EvidenceSelection(
-            chunks=[chunk for chunk in selection.chunks if chunk[1] in chosen],
-            pools=selection.pools,
         )
