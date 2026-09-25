@@ -202,9 +202,10 @@ TEXT_SIGNALS = {
     ),
     "discussion_limitations": (
         r"\b(?:limited|limitation|constraint|issue|under-?represented|overplotting|missing|"
-        r"unavailable|bias|censoring|left-censor|scalability)\w*\b",
-        r"\b(?:could not|cannot|did not|lack of|may require|require(?:s|d)? .{0,40}"
-        r"modifications?)\b",
+        r"unavailable|bias|censoring|left-censor|scalability|trade-?off|overhead)\w*\b",
+        r"\b(?:could not|cannot|did not|does not|has not|have not|was not|were not|"
+        r"not evaluated|not studied|not considered|lack of|may require|"
+        r"require(?:s|d)? .{0,40} modifications?)\b",
     ),
     "discussion_deployment": (
         r"\b(?:generali[sz]ability|deployment|extend|extension|broader|additional datasets?|"
@@ -214,14 +215,17 @@ TEXT_SIGNALS = {
     ),
     "limitations": (
         r"\b(?:limited|limitation|constraint|issue|missing|unavailable|could not|cannot|however|"
-        r"threat|did not|lack of|may require|require(?:s|d)? .{0,40} modifications?)\b",
+        r"threat|did not|does not|has not|have not|was not|were not|not evaluated|"
+        r"not studied|not considered|lack of|may require|"
+        r"require(?:s|d)? .{0,40} modifications?)\b",
         r"\b(?:overplotting|under-?represented|scalability|bias|censoring|left-censor)\w*\b",
     ),
     "future_work": (
         r"\b(?:future (?:work|investigation|research|deployment|extension|data collection|"
         r"direction))\b",
         r"\b(?:further (?:work|investigation|deployment)|additional data|broader deployment|"
-        r"we (?:plan|intend|hope) to|we will|marked .{0,80} future|could be extended|can extend)\b",
+        r"we (?:plan|intend|hope|aim) (?:to|on)|we (?:will|envision)|"
+        r"marked .{0,80} future|could be extended|can extend)\b",
     ),
     "audience": (
         r"\b(?:domain experts?|clinicians?|researchers?|analysts?|practitioners?|users?)\b",
@@ -253,8 +257,12 @@ _NON_AUTHOR_FUTURE_SIGNALS = (
     r"\b(?:users?|readers?|practitioners?)\s+(?:should|could|may|might)\b",
     r"\bwe\s+recommend\s+(?:that\s+)?(?:users?|readers?|practitioners?)\b",
     r"\b(?:might|may)\s+fare\s+better\b",
-    r"\b(?:prior|previous)\s+(?:work|stud(?:y|ies))\b.{0,100}\b(?:could|will|may|might)\b",
-    r"\b[A-Z][A-Za-z-]+\s+et\s+al\.\b.{0,100}\b(?:could|will|may|might)\b",
+    r"\b(?:prior|previous)\s+(?:work|stud(?:y|ies))\b.{0,100}\b"
+    r"(?:could|will|may|might|plans?|intends?|aims?|hopes?)\b",
+    r"\b[A-Z][A-Za-z-]+\s+et\s+al\.\b.{0,100}\b"
+    r"(?:could|will|may|might|plans?|intends?|aims?|hopes?)\b",
+    r"\b(?:their\s+(?:work|study|method|system)|they)\b.{0,100}\b"
+    r"(?:could|will|may|might|plans?|intend|aim|hope)\b",
 )
 _METHOD_DESCRIPTION_SIGNALS = (
     r"\bwe (?:use|used|apply|applied|decided to use|calculate|calculated|compute|computed|"
@@ -275,6 +283,10 @@ _RESULT_OBSERVATION_SIGNALS = (
     r"\b(?:experts?|participants?|users?|respondents?)\s+"
     r"(?:found|reported|noted|observed|highlighted|appreciated|preferred|valued|agreed)\b",
     r"\b(?:themes?|patterns?)\s+(?:emerged|were identified|were observed)\b",
+    r"\b(?:survey|case stud(?:y|ies)|analysis)\s+"
+    r"(?:found|revealed|showed|identified|reported|indicated)\b",
+    r"\b(?:accuracy|runtime|latency|error|score|quality|performance)\s+"
+    r"(?:increased|decreased|improved|declined|was|were|is|are)\b",
 )
 _FINDING_HEADING = re.compile(
     r"\b(?:evaluation|results?|findings?|experiments?|case stud(?:y|ies)|analysis|"
@@ -291,6 +303,34 @@ _CAPABILITY_ONLY = re.compile(
     r"(?:can|supports?|enables?|allows?|provides?|offers?|is designed to)\b",
     re.I,
 )
+_EVALUATION_SETUP_ONLY = re.compile(
+    r"\b(?:we|the (?:study|evaluation|experiment|analysis))\s+"
+    r"(?:compare|compared|evaluate|evaluated|analy[sz]e|analy[sz]ed|investigate|"
+    r"investigated|measure|measured|test|tested|examine|examined)\b",
+    re.I,
+)
+_HOW_TO_DEMONSTRATION = re.compile(
+    r"\b(?:shows?|demonstrates?|illustrates?)\s+how\b|\buse case\b.{0,100}"
+    r"\b(?:can|supports?|enables?|allows?)\b",
+    re.I,
+)
+_PASSIVE_OUTCOME = re.compile(
+    r"\b(?:was|were|is|are|became|had|has|have|seemed\s+to\s+have)\s+"
+    r"(?:higher|lower|more|less|earlier|later|longer|"
+    r"shorter|better|worse|larger|smaller|faster|slower|easier|harder|comparable|"
+    r"similar|different)\b",
+    re.I,
+)
+_QUANTITATIVE_OUTCOME = re.compile(
+    r"\b\d+(?:\.\d+)?\s*(?:%|percent|ms|seconds?|minutes?|hours?|points?|"
+    r"accuracy|f1|bleu|errors?)\b",
+    re.I,
+)
+_DIRECTIONAL_OUTCOME = re.compile(
+    r"\b(?:reduce[sd]?|decrease[sd]?|increase[sd]?|improve[sd]?|decline[sd]?|"
+    r"outperform(?:s|ed)?|exceed(?:s|ed)?|surpass(?:es|ed)?)\b",
+    re.I,
+)
 
 
 def supports_future_work(text: str) -> bool:
@@ -302,15 +342,25 @@ def supports_future_work(text: str) -> bool:
 
 def supports_finding(text: str, headings: tuple[str, ...] = ()) -> bool:
     """Require current-paper result/observation evidence, including qualitative findings."""
+    if _HOW_TO_DEMONSTRATION.search(text):
+        return False
     if any(re.search(signal, text, re.I) for signal in _RESULT_OBSERVATION_SIGNALS):
+        return True
+    if (
+        _PASSIVE_OUTCOME.search(text)
+        or _QUANTITATIVE_OUTCOME.search(text)
+        or _DIRECTIONAL_OUTCOME.search(text)
+    ):
         return True
     if any(re.search(signal, text, re.I) for signal in _METHOD_DESCRIPTION_SIGNALS):
         return False
     if _CAPABILITY_ONLY.search(text):
         return False
+    if _EVALUATION_SETUP_ONLY.search(text):
+        return False
     if headings and all(_NON_FINDING_HEADING.search(heading) for heading in headings):
         return False
-    return bool(headings and any(_FINDING_HEADING.search(heading) for heading in headings))
+    return False
 
 
 @dataclass(frozen=True)
@@ -323,27 +373,55 @@ class EvidenceSelection:
 _LIST_MARKER = re.compile(r"(?<!\w)(?:\(\d{1,3}\)|\d{1,3}[.)]|[a-z][.)]|[•▪◦])\s+", re.I)
 
 
-def _contribution_list_items(text: str) -> list[str]:
-    """Return every item from an author-declared numbered or bulleted contribution list."""
-    if not any(
-        re.search(pattern, text, re.I) for pattern in TEXT_SIGNALS["explicit_contributions"]
-    ):
+_CONTRIBUTION_HEADER = re.compile(
+    r"\b(?:(?:our|the)\s+)?(?:main\s+|key\s+|primary\s+)?contributions?\s+"
+    r"(?:are|include|is|consist(?:s)?\s+of|of\s+this\s+work\s+(?:are|include))\b|"
+    r"\bwe\s+make\s+the\s+following\s+contributions?\b|"
+    r"\bthis\s+work\s+contributes?\b",
+    re.I,
+)
+_BARE_CONTRIBUTION_HEADER = re.compile(
+    r"^\s*(?:(?:our|the)\s+)?(?:main\s+|key\s+|primary\s+)?contributions?\s+"
+    r"(?:are|include|are\s+as\s+follows|include\s+the\s+following)?\s*[.:]?\s*$",
+    re.I,
+)
+
+
+def _contribution_list_items(text: str, *, limit: int = 6) -> list[str]:
+    """Return bounded substantive items associated with an author-declared contribution list."""
+    header = _CONTRIBUTION_HEADER.search(text)
+    if header is None:
         return []
-    markers = list(_LIST_MARKER.finditer(text))
-    if len(markers) < 2:
-        bullet_lines = [
-            line.strip()
-            for line in text.splitlines()
-            if re.match(r"^[-*]\s+\S", line.strip()) is not None
-        ]
-        return bullet_lines if len(bullet_lines) >= 2 else []
-    items = []
+    tail = text[header.end() :]
+    markers = list(_LIST_MARKER.finditer(tail))
+    items: list[str] = []
     for index, marker in enumerate(markers):
-        end = markers[index + 1].start() if index + 1 < len(markers) else len(text)
-        item = text[marker.start() : end].strip().strip(";").strip()
-        if len(item) >= 20:
+        end = markers[index + 1].start() if index + 1 < len(markers) else len(tail)
+        item = tail[marker.start() : end].strip().strip(";").strip()
+        if len(re.findall(r"\b\w+\b", item)) >= 4:
             items.append(item)
-    return items
+    if not items:
+        items.extend(
+            line.strip()
+            for line in tail.splitlines()
+            if re.match(r"^[-*]\s+\S", line.strip()) is not None
+            and len(re.findall(r"\b\w+\b", line)) >= 4
+        )
+    if not items:
+        items.extend(
+            passage
+            for passage in _passages(tail)
+            if len(re.findall(r"\b\w+\b", passage)) >= 5
+            and _BARE_CONTRIBUTION_HEADER.fullmatch(passage) is None
+        )
+    deduplicated: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        normalized = " ".join(re.sub(r"\W+", " ", item.casefold()).split())
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            deduplicated.append(item)
+    return deduplicated[:limit]
 
 
 def _passages(text: str) -> list[str]:
@@ -369,10 +447,17 @@ _BARE_BOUNDARY_PASSAGE = re.compile(
     re.I,
 )
 _CONCRETE_LIMITATION = re.compile(
-    r"\b(?:cannot|could\s+not|did\s+not|does\s+not|has\s+not|have\s+not|not\s+yet|"
+    r"\b(?:cannot|could\s+not|did\s+not|does\s+not|has\s+not|have\s+not|"
+    r"was\s+not|were\s+not|not\s+(?:yet|evaluated|studied|considered|measured)|"
     r"lack(?:s|ed|ing)?|limited|limitation|constraint|restrict(?:s|ed|ing)?|"
     r"unavailable|incomplete|slow|scalability|bias(?:ed)?|no\s+guaranteed?|"
-    r"memory\s+(?:cost|requirement|footprint)|overhead|trade-?off)\b",
+    r"memory\s+(?:cost|requirement|footprint)|comput(?:e|ation(?:al)?)\s+cost|"
+    r"overhead|trade-?off|under-?represented|overplotting|censoring)\b",
+    re.I,
+)
+_STRONG_LIMITATION = re.compile(
+    r"\b(?:we\s+(?:did|do|could|can|have|were)\s+not|not\s+evaluated|not\s+studied|"
+    r"not\s+considered|cannot|does\s+not|no\s+guaranteed?|limitation)\b",
     re.I,
 )
 
@@ -387,38 +472,72 @@ def _substantive_boundary_passage(passage: str) -> bool:
 def reserve_boundary_passages(
     selection: EvidenceSelection,
     *,
-    limitation_limit: int = 3,
-    future_limit: int = 3,
+    limitation_limit: int = 4,
+    future_limit: int = 4,
 ) -> EvidenceSelection:
     """Reserve a small set of concrete end-section boundary sentences before catalog ranking."""
-    limitations: list[tuple[str, str]] = []
-    future: list[tuple[str, str]] = []
-    seen: set[str] = set()
+    limitations: list[tuple[int, int, str, str]] = []
+    future: list[tuple[int, int, str, str]] = []
+    seen_limitations: set[str] = set()
+    seen_future: set[str] = set()
+    order = 0
     for heading, chunk_id, text in selection.chunks:
         if _BOUNDARY_HEADING.search(heading) is None:
             continue
         explicit_limitation = _EXPLICIT_LIMITATION_HEADING.search(heading) is not None
         explicit_future = _EXPLICIT_FUTURE_HEADING.search(heading) is not None
         for passage in _passages(text):
+            order += 1
             normalized = " ".join(re.sub(r"\W+", " ", passage.casefold()).split())
-            if not normalized or normalized in seen or not _substantive_boundary_passage(passage):
+            if not normalized or not _substantive_boundary_passage(passage):
                 continue
-            if (explicit_limitation or _CONCRETE_LIMITATION.search(passage)) and (
-                _CONCRETE_LIMITATION.search(passage) is not None
+            if (
+                (explicit_limitation or _CONCRETE_LIMITATION.search(passage))
+                and (_CONCRETE_LIMITATION.search(passage) is not None)
+                and normalized not in seen_limitations
             ):
-                limitations.append((chunk_id, passage))
-                seen.add(normalized)
-                continue
-            if (explicit_future or re.search(r"\b(?:discussion|conclusion)\b", heading, re.I)) and (
-                supports_future_work(passage)
+                score = 4 + 3 * bool(_STRONG_LIMITATION.search(passage))
+                score += int(explicit_limitation)
+                limitations.append((score, order, chunk_id, passage))
+                seen_limitations.add(normalized)
+            if (
+                (explicit_future or re.search(r"\b(?:discussion|conclusion)\b", heading, re.I))
+                and (supports_future_work(passage))
+                and normalized not in seen_future
             ):
-                future.append((chunk_id, passage))
-                seen.add(normalized)
+                score = 4 + 2 * bool(
+                    re.search(r"\bwe\s+(?:will|plan|intend|aim|hope)", passage, re.I)
+                )
+                score += int(explicit_future)
+                future.append((score, order, chunk_id, passage))
+                seen_future.add(normalized)
+
+    def bounded_diverse(
+        candidates: list[tuple[int, int, str, str]], limit: int
+    ) -> list[tuple[str, str]]:
+        ranked = sorted(candidates, key=lambda item: (-item[0], item[1]))
+        chosen: list[tuple[int, int, str, str]] = []
+        represented: set[str] = set()
+        for candidate in ranked:
+            if candidate[2] not in represented:
+                chosen.append(candidate)
+                represented.add(candidate[2])
+            if len(chosen) >= limit:
+                break
+        for candidate in ranked:
+            if len(chosen) >= limit:
+                break
+            if candidate not in chosen:
+                chosen.append(candidate)
+        return [
+            (chunk_id, passage)
+            for _score, _order, chunk_id, passage in sorted(chosen, key=lambda item: item[1])
+        ]
 
     priority: dict[str, list[str]] = {}
     for chunk_id, passage in [
-        *limitations[:limitation_limit],
-        *future[:future_limit],
+        *bounded_diverse(limitations, limitation_limit),
+        *bounded_diverse(future, future_limit),
     ]:
         priority.setdefault(chunk_id, []).append(passage)
     return EvidenceSelection(

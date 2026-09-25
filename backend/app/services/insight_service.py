@@ -30,7 +30,7 @@ from app.services.insight_selector import (
     supports_future_work,
 )
 
-EXTRACTION_VERSION = "m2b-v15-generalized-insights"
+EXTRACTION_VERSION = "m2b-v16-trust-hardening"
 COVERAGE_LIMITS = {
     "research_problem": 4,
     "methods": 8,
@@ -64,8 +64,10 @@ SYSTEM_PROMPT = (
     "future work; future_work requires an explicit future investigation, extension, plan, or "
     "deployment statement. research_problem, why_it_matters, and target_audience are grounded "
     "synthesis fields. why_it_matters must be synthesized from grounded problem, contribution, "
-    "finding, or discussion evidence, must cite contribution, finding, or discussion evidence, "
-    "and must not assert a stronger causal or practical effect than those passages support."
+    "finding, or discussion evidence. Each why_it_matters claim must connect at least two "
+    "distinct validated story components (Problem, Contribution, or Finding), cite their minimum "
+    "evidence union, and must not assert a stronger causal or practical effect than those "
+    "passages support. A capability or contribution alone is not why_it_matters."
 )
 
 
@@ -429,6 +431,82 @@ _CURRENT_STUDY_RESULT = re.compile(
     r"demonstrated|report)\w*\b",
     re.I,
 )
+_EXTERNAL_AUTHOR_ACTION = re.compile(
+    r"\b(?!(?:Participants|Experts|Users|Respondents|The|Our|This|We)\b)"
+    r"[A-Z][A-Za-z-]+(?:\s+(?:and|&)\s+[A-Z][A-Za-z-]+|\s+et\s+al\.)?\s+"
+    r"(?:propose[sd]?|introduce[sd]?|develop(?:ed|s)?|present(?:ed|s)?|"
+    r"found|showed|report(?:ed|s)?)\b",
+)
+_CURRENT_CONTRIBUTION_ACTION = re.compile(
+    r"\b(?:we|this\s+(?:work|paper|study|analysis))\s+"
+    r"(?:introduce|propose|present|develop|create|build|contribute|provide|release|"
+    r"collect|compile|conduct|analy[sz]e|characterize|demonstrate|design|implement|"
+    r"establish|formulate|show|report)\w*\b|"
+    r"\b(?:our|the\s+proposed)\s+(?:dataset|taxonomy|design\s+space|analysis|survey|"
+    r"framework|system|method|approach|model|algorithm|tool|study|evaluation)\b",
+    re.I,
+)
+_DECLARED_CONTRIBUTION = re.compile(
+    r"\b(?:(?:our|the)\s+)?(?:main\s+|key\s+|primary\s+)?contributions?\s+"
+    r"(?:are|include|consist(?:s)?\s+of|of\s+this\s+work\s+(?:are|include))\b|"
+    r"\bwe\s+make\s+the\s+following\s+contributions?\b|"
+    r"\bthis\s+work\s+contributes?\b",
+    re.I,
+)
+_BARE_CONTRIBUTION = re.compile(
+    r"^\s*(?:(?:our|the)\s+)?(?:main\s+|key\s+|primary\s+)?contributions?\s+"
+    r"(?:are|include|are\s+as\s+follows|include\s+the\s+following)?\s*[.:]?\s*$",
+    re.I,
+)
+_FINDING_SETUP = re.compile(
+    r"\b(?:compare[sd]?|evaluat(?:e|ed|ion)|analy[sz](?:e|ed|is)|investigat(?:e|ed|ion)|"
+    r"measur(?:e|ed|ement)|test(?:ed|ing)?|examin(?:e|ed|ation))\b",
+    re.I,
+)
+_CAPABILITY_LANGUAGE = re.compile(
+    r"\b(?:system|framework|tool|method|approach|grammar|platform|model|use case)\b.{0,60}"
+    r"\b(?:can|supports?|enables?|allows?|provides?|offers?|shows?\s+how|"
+    r"demonstrates?\s+how)\b",
+    re.I,
+)
+_EXPLICIT_NEGATIVE_LIMITATION = re.compile(
+    r"\b(?:we\s+(?:did|do|could|can|have|were)\s+not|(?:was|were|is|are|has|have)\s+not|"
+    r"not\s+(?:evaluated|studied|considered|measured|supported)|cannot|does\s+not|"
+    r"lacks?|without|no)\b",
+    re.I,
+)
+_CLAIM_NEGATION = re.compile(r"\b(?:no|not|never|without|cannot|lacks?|did not)\b", re.I)
+_MATERIAL_QUALIFIER = re.compile(
+    r"\b(?:but|however|although|except|only|whereas|while|unless|provided that|"
+    r"assuming|subject to|limited to|under|for .{1,60} but not)\b",
+    re.I,
+)
+_NEGATED_RELATION = re.compile(
+    r"\b(?:does\s+not|did\s+not|is\s+not|was\s+not|are\s+not|were\s+not|"
+    r"unaffected|without|no)\b",
+    re.I,
+)
+_AUDIENCE_ROLE = re.compile(
+    r"\b(?:users?|practitioners?|researchers?|analysts?|clinicians?|engineers?|planners?|"
+    r"scientists?|developers?|educators?|students?|operators?|decision[- ]makers?|"
+    r"stakeholders?|professionals?|experts?)\b",
+    re.I,
+)
+_EXPLICIT_AUDIENCE = re.compile(
+    r"\b(?:intended|designed|developed|built)\s+for\b|"
+    r"\b(?:primary|intended|target)\s+(?:users?|audience)\b|"
+    r"\bwe\s+target\b|\bused\s+by\b|\bserves?\b|"
+    r"\b(?:users?|audience)\s+(?:include|are)\b",
+    re.I,
+)
+_WHY_RELATION = re.compile(
+    r"\b(?:address(?:es|ed)?|overcom(?:e|es|ing)|bridg(?:e|es|ing)|thereby|so that|"
+    r"enabl(?:e|es|ing)|allow(?:s|ed|ing)|help(?:s|ed|ing)|facilitat(?:e|es|ing)|"
+    r"reduc(?:e|es|ing)|"
+    r"make(?:s|ing)?|provid(?:e|es|ing).{0,40}(?:needed|required|basis|means)|"
+    r"while\s+(?:maintaining|preserving)|without\s+(?:reducing|sacrificing))\b",
+    re.I,
+)
 _DETAIL_GENERIC_WORDS = {
     "also",
     "analysis",
@@ -643,11 +721,111 @@ def _adds_unsupported_detail(claim: str, evidence: str) -> bool:
     return len(claim_terms) >= 5 and len(shared) / len(claim_terms) < 0.2
 
 
-def _prior_work_only(evidence: str) -> bool:
-    """Return true only when evidence clearly attributes its substance to other work."""
-    return (
-        _PRIOR_WORK_ATTRIBUTION.search(evidence) is not None
-        and _CURRENT_PAPER_ATTRIBUTION.search(evidence) is None
+def _claim_supporting_clauses(claim: str, evidence: str) -> list[str]:
+    """Return evidence clauses most closely aligned with the candidate's substance."""
+    clauses = [
+        clause.strip()
+        for clause in re.split(r"(?<=[.!?;])\s+|\b(?:but|whereas)\b", evidence, flags=re.I)
+        if clause.strip()
+    ] or [evidence]
+    claim_terms = _detail_terms(claim) or _content_words(claim)
+    if not claim_terms:
+        return clauses
+    scored = [
+        (len(claim_terms & (_detail_terms(clause) or _content_words(clause))), clause)
+        for clause in clauses
+    ]
+    best = max((score for score, _clause in scored), default=0)
+    return [clause for score, clause in scored if score == best and score > 0] or clauses
+
+
+def _has_current_owner(text: str) -> bool:
+    return bool(
+        _CURRENT_PAPER_ATTRIBUTION.search(text)
+        or re.search(r"\bthe\s+proposed\s+(?:approach|method|system|model|framework)\b", text, re.I)
+    )
+
+
+def _has_prior_owner(text: str) -> bool:
+    return bool(_PRIOR_WORK_ATTRIBUTION.search(text) or _EXTERNAL_AUTHOR_ACTION.search(text))
+
+
+def _support_attributed_to_prior_work(claim: str, evidence: str) -> bool:
+    """Detect when the clauses supporting a claim belong only to external/prior work."""
+    supporting = _claim_supporting_clauses(claim, evidence)
+    if any(_has_current_owner(clause) for clause in supporting):
+        return False
+    return bool(supporting) and all(_has_prior_owner(clause) for clause in supporting)
+
+
+def _contribution_substantively_supported(claim: str, evidence: str) -> bool:
+    """Require aligned evidence that declares a current-paper contribution or action."""
+    if _BARE_CONTRIBUTION.fullmatch(evidence):
+        return False
+    claim_terms = _detail_terms(claim) or _content_words(claim)
+    if not claim_terms:
+        return False
+    declared = _DECLARED_CONTRIBUTION.search(evidence) is not None
+    for clause in _claim_supporting_clauses(claim, evidence):
+        clause_terms = _detail_terms(clause) or _content_words(clause)
+        shared = claim_terms & clause_terms
+        if not shared or len(shared) / len(claim_terms) < 0.2:
+            continue
+        if _has_prior_owner(clause) and not _has_current_owner(clause):
+            continue
+        if _CURRENT_CONTRIBUTION_ACTION.search(clause):
+            return True
+        if declared and len(re.findall(r"\b\w+\b", clause)) >= 4:
+            return True
+    return False
+
+
+def _material_qualifier_preserved(claim: str, evidence: str) -> bool:
+    """Reject material scope/exception loss without requiring incidental details."""
+    if _MATERIAL_QUALIFIER.search(evidence) is None:
+        return True
+    claim_concepts = _semantic_concepts(claim)
+    clauses = re.split(r"\b(?:but|however|although|except|whereas|while)\b", evidence, flags=re.I)
+    if len(clauses) > 1:
+        before, after = clauses[0], " ".join(clauses[1:])
+        before_overlap = claim_concepts & _semantic_concepts(before)
+        after_concepts = _semantic_concepts(after)
+        material_exception = bool(
+            _NEGATED_RELATION.search(after)
+            or _DIRECTION_PATTERN.search(after)
+            or re.search(r"\b(?:except|limited|only)\b", after, re.I)
+        )
+        if (
+            len(before_overlap) >= 2
+            and material_exception
+            and not claim_concepts.intersection(after_concepts)
+        ):
+            return False
+        if (
+            _NEGATED_RELATION.search(after)
+            and len(claim_concepts & after_concepts) >= 2
+            and _CLAIM_NEGATION.search(claim) is None
+        ):
+            return False
+    scoped = re.search(
+        r"\b(?:only|limited to|under|provided that|assuming|subject to)\b(?P<scope>.{1,100})",
+        evidence,
+        re.I,
+    )
+    if scoped is not None and not re.search(
+        r"\b(?:only|limited to|under|provided that|assuming|subject to)\b", claim, re.I
+    ):
+        scope_concepts = _semantic_concepts(scoped.group("scope"))
+        if scope_concepts and not claim_concepts.intersection(scope_concepts):
+            return False
+    return True
+
+
+def _explicit_audience_supported(evidence: str) -> bool:
+    return bool(
+        _AUDIENCE_ROLE.search(evidence)
+        and _EXPLICIT_AUDIENCE.search(evidence)
+        and not _support_attributed_to_prior_work(evidence, evidence)
     )
 
 
@@ -674,10 +852,14 @@ def explicit_claim_rejection_reason(
         return None
 
     evidence = " ".join(reference.quote for reference in item.evidence)
-    if field in {"key_contributions", "main_findings", "limitations"} and _prior_work_only(
-        evidence
+    if field in {"key_contributions", "main_findings", "limitations"} and (
+        _support_attributed_to_prior_work(item.claim, evidence)
     ):
-        return "prior_work_current_paper_restriction"
+        return "prior_work_attribution"
+    if field == "key_contributions" and not _contribution_substantively_supported(
+        item.claim, evidence
+    ):
+        return "contribution_support_mismatch"
     if field == "main_findings":
         evidence_headings = tuple(
             headings.get(reference.chunk_id, "") for reference in item.evidence
@@ -687,11 +869,21 @@ def explicit_claim_rejection_reason(
             and all(_RELATED_WORK_HEADING.search(heading) for heading in evidence_headings)
             and _CURRENT_STUDY_RESULT.search(evidence) is None
         ):
-            return "prior_work_current_paper_restriction"
+            return "prior_work_attribution"
         if not supports_finding(evidence, evidence_headings):
-            return "method_or_capability_as_finding_restriction"
+            if _CAPABILITY_LANGUAGE.search(evidence):
+                return "capability_not_finding"
+            if _FINDING_SETUP.search(evidence):
+                return "comparison_without_outcome"
+            return "finding_without_outcome"
     if field == "future_work" and not supports_future_work(evidence):
         return "future_work_guard"
+    if (
+        field == "limitations"
+        and _CLAIM_NEGATION.search(item.claim) is not None
+        and _EXPLICIT_NEGATIVE_LIMITATION.search(evidence) is None
+    ):
+        return "limitation_not_explicit"
     if not _entity_consistent(item.claim, evidence):
         return "entity_mismatch"
     if _comparison_conflicts(item.claim, evidence):
@@ -703,7 +895,15 @@ def explicit_claim_rejection_reason(
             return "future_work_strength_or_condition_mismatch"
     elif not _uncertainty_preserved(item.claim, evidence):
         return "uncertainty_mismatch"
-    if _adds_unsupported_detail(item.claim, evidence):
+    if not _material_qualifier_preserved(item.claim, evidence):
+        return "qualifier_scope_mismatch"
+    explicit_negative_limitation = (
+        field == "limitations"
+        and _CLAIM_NEGATION.search(item.claim) is not None
+        and _EXPLICIT_NEGATIVE_LIMITATION.search(evidence) is not None
+        and bool(_semantic_concepts(item.claim) & _semantic_concepts(evidence))
+    )
+    if _adds_unsupported_detail(item.claim, evidence) and not explicit_negative_limitation:
         return "unsupported_attribute_or_detail"
     return None
 
@@ -727,7 +927,7 @@ def synthesis_claim_rejection_reason(item: InsightClaim, field: str) -> str | No
     evidence_concepts = _semantic_concepts(evidence_text)
     if not claim_concepts:
         return "missing_semantic_concepts"
-    thresholds = {"research_problem": 0.35, "why_it_matters": 0.70, "target_audience": 0.30}
+    thresholds = {"research_problem": 0.35, "why_it_matters": 0.55, "target_audience": 0.30}
     coverage = len(claim_concepts & evidence_concepts) / len(claim_concepts)
     if coverage < thresholds[field]:
         return "semantic_concept_coverage"
@@ -740,28 +940,58 @@ def synthesis_claim_rejection_reason(item: InsightClaim, field: str) -> str | No
             return "contrast_direction_mismatch"
         if not _uncertainty_preserved(item.claim, evidence_text):
             return "uncertainty_mismatch"
+        if not _material_qualifier_preserved(item.claim, evidence_text):
+            return "qualifier_scope_mismatch"
         for roots in _EFFECT_GROUPS:
             if _mentions_effect(item.claim, roots) and not _mentions_effect(evidence_text, roots):
                 return "unsupported_effect_or_causality"
+    if field == "target_audience" and not _explicit_audience_supported(evidence_text):
+        return "audience_not_explicit"
     return None
 
 
 def _minimum_synthesis_evidence(
     item: InsightClaim,
     field: str,
-    required_story_evidence: set[tuple[str, str]],
+    story_evidence_types: dict[tuple[str, str], set[str]],
 ) -> InsightClaim | None:
     """Find the smallest cited evidence union that supports a synthesis claim."""
-    for size in range(1, len(item.evidence) + 1):
+    minimum_size = 2 if field == "why_it_matters" else 1
+    for size in range(minimum_size, len(item.evidence) + 1):
         for selected in combinations(item.evidence, size):
-            if field == "why_it_matters" and not any(
-                (reference.chunk_id, _normalize_quote(reference.quote)) in required_story_evidence
-                for reference in selected
-            ):
-                continue
             candidate = InsightClaim(claim=item.claim, evidence=list(selected))
-            if synthesis_claim_rejection_reason(candidate, field) is None:
+            if field == "why_it_matters":
+                if _why_synthesis_rejection_reason(candidate, story_evidence_types) is None:
+                    return candidate
+            elif synthesis_claim_rejection_reason(candidate, field) is None:
                 return candidate
+    return None
+
+
+def _why_synthesis_rejection_reason(
+    item: InsightClaim,
+    story_evidence_types: dict[tuple[str, str], set[str]],
+) -> str | None:
+    base_reason = synthesis_claim_rejection_reason(item, "why_it_matters")
+    if base_reason is not None:
+        return base_reason
+    if _WHY_RELATION.search(item.claim) is None:
+        return "why_not_synthesis"
+    claim_concepts = _semantic_concepts(item.claim)
+    types: set[str] = set()
+    concept_supported_types: set[str] = set()
+    distinct_story_references: set[tuple[str, str]] = set()
+    for reference in item.evidence:
+        key = (reference.chunk_id, _normalize_quote(reference.quote))
+        reference_types = story_evidence_types.get(key, set())
+        if not reference_types:
+            continue
+        distinct_story_references.add(key)
+        types.update(reference_types)
+        if claim_concepts & _semantic_concepts(reference.quote):
+            concept_supported_types.update(reference_types)
+    if len(types) < 2 or len(concept_supported_types) < 2 or len(distinct_story_references) < 2:
+        return "why_not_synthesis"
     return None
 
 
@@ -771,50 +1001,22 @@ def filter_synthesis_support(
     diagnostics: InsightDiagnostics | None = None,
 ) -> InsightFields:
     """Retain only lexically supported synthesis and story-grounded significance claims."""
-    discussion_ids = {
-        chunk.id
-        for section in document.sections
-        if re.search(r"\b(?:discussion|conclusion)\b", section.heading or "", re.I)
-        for chunk in section.chunks
-    }
-    contribution_ids = {
-        reference.chunk_id for item in insights.key_contributions for reference in item.evidence
-    }
-    problem_ids = {
-        reference.chunk_id for item in insights.research_problem for reference in item.evidence
-    }
-    finding_ids = {
-        reference.chunk_id for item in insights.main_findings for reference in item.evidence
-    }
-    why_required_ids = problem_ids | contribution_ids | finding_ids | discussion_ids
-    story_evidence = {
-        (reference.chunk_id, _normalize_quote(reference.quote))
-        for field in ("research_problem", "key_contributions", "main_findings")
-        for story_item in getattr(insights, field)
-        for reference in story_item.evidence
-    }
+    story_evidence_types: dict[tuple[str, str], set[str]] = {}
+    for field in ("research_problem", "key_contributions", "main_findings"):
+        for story_item in getattr(insights, field):
+            for reference in story_item.evidence:
+                key = (reference.chunk_id, _normalize_quote(reference.quote))
+                story_evidence_types.setdefault(key, set()).add(field)
     filtered = insights.model_copy(deep=True)
     for field in _SYNTHESIS_FIELDS:
         kept = []
         for item in getattr(filtered, field):
-            if field == "why_it_matters" and (
-                not any(reference.chunk_id in why_required_ids for reference in item.evidence)
-                or not any(
-                    (reference.chunk_id, _normalize_quote(reference.quote)) in story_evidence
-                    for reference in item.evidence
-                )
-            ):
-                if diagnostics is not None:
-                    diagnostics.record_validation(
-                        field,
-                        item,
-                        retained=False,
-                        rule="synthesis_semantic_support",
-                        reason="why_it_matters_story_source",
-                    )
-                continue
-            supported = _minimum_synthesis_evidence(item, field, story_evidence)
-            rejection_reason = synthesis_claim_rejection_reason(item, field)
+            supported = _minimum_synthesis_evidence(item, field, story_evidence_types)
+            rejection_reason = (
+                _why_synthesis_rejection_reason(item, story_evidence_types)
+                if field == "why_it_matters"
+                else synthesis_claim_rejection_reason(item, field)
+            )
             if supported is not None:
                 kept.append(supported)
                 if diagnostics is not None:
@@ -1034,10 +1236,13 @@ class InsightService:
             "harmonization, system implementation, or evaluation procedures; keep distinct method "
             "categories separate and never put scores or performance comparisons under methods. "
             "For contributions, prefer passages where the authors explicitly declare their "
-            "contributions and preserve every distinct listed item. Findings must use supplied "
+            "contributions and preserve every distinct listed item. Never attribute another "
+            "paper's work to the current paper, and do not infer a contribution from a need or "
+            "gap alone. Findings must use supplied "
             "Evaluation, Results, Case Study, Expert Feedback, or Discussion evidence when such "
-            "evidence is present, and must cite an observation or result rather than a method "
-            "description. Only return a limitation when its excerpt explicitly states a "
+            "evidence is present, and must cite an observed outcome rather than a comparison "
+            "setup, method description, capability, or use-case procedure. Only return a "
+            "limitation when its excerpt explicitly states a "
             "constraint, inability, threat, or unresolved problem. Never convert that limitation "
             "into future_work; future_work requires explicit future investigation, extension, "
             "plan, or deployment language. For why_it_matters, synthesize only from the already "
@@ -1045,8 +1250,10 @@ class InsightService:
             "supplemented only by supplied Expert Feedback or Discussion/Conclusion excerpts. "
             "State the scientific capability or "
             "understanding the work enabled; do not state a stronger causal or practical effect "
-            "than the evidence. Only return target audience when evidence names "
-            "or directly describes that audience. Use [] for unsupported fields."
+            "than the evidence. A Why It Matters item must connect at least two distinct "
+            "validated Problem, Contribution, or Finding components; a lone capability is not "
+            "significance. Only return target audience when evidence explicitly names intended "
+            "or target users, not merely a relevant domain. Use [] for unsupported fields."
         )
 
     async def _extract_batch(

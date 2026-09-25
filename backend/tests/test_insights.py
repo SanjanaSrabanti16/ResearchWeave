@@ -1663,8 +1663,8 @@ def test_boundary_reservation_skips_bare_headers_and_is_bounded_and_deduplicated
 
     reserved = _reserved_passages(document)
 
-    assert len(reserved) == 6
-    assert len(set(reserved)) == 6
+    assert len(reserved) == 8
+    assert len(set(reserved)) == 8
     assert "Our limitations are as follows." not in reserved
     assert "Future Work." not in reserved
 
@@ -2001,4 +2001,4 @@ async def test_diagnostics_record_updated_prior_work_rejection_reason(tmp_path) 
     )
     assert calls == 3
     assert result.insights.key_contributions == []
-    assert candidate["validation"][0]["reason"] == "prior_work_current_paper_restriction"
+    assert candidate["validation"][0]["reason"] == "prior_work_attribution"
