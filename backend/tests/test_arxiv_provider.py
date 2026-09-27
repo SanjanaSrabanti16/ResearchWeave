@@ -5,7 +5,7 @@ import arxiv
 import httpx
 import pytest
 
-from app.providers.arxiv import ArxivProvider
+from app.providers.arxiv import ArxivProvider, _TimeoutSession
 from app.providers.base import ProviderError
 
 
@@ -39,7 +39,53 @@ async def test_arxiv_client_has_safe_paging_rate_limit_and_retries() -> None:
         provider = ArxivProvider(async_client)
         assert provider.arxiv_client.page_size <= 100
         assert provider.arxiv_client.delay_seconds >= 3
-        assert provider.arxiv_client.num_retries == 5
+        assert provider.arxiv_client.num_retries == 2
+        assert isinstance(provider.arxiv_client._session, _TimeoutSession)
+        assert provider.arxiv_client._session.timeout_seconds == 10.0
+
+
+def test_arxiv_timeout_session_applies_default_and_preserves_explicit_timeout() -> None:
+    class RecordingSession:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def get(self, _: str, **kwargs: object) -> object:
+            self.calls.append(kwargs)
+            return object()
+
+    delegate = RecordingSession()
+    session = _TimeoutSession(delegate, 7.5)
+
+    session.get("https://export.arxiv.org/api/query")
+    session.get("https://export.arxiv.org/api/query", timeout=2.0)
+
+    assert delegate.calls == [{"timeout": 7.5}, {"timeout": 2.0}]
+
+
+@pytest.mark.asyncio
+async def test_arxiv_request_timeout_must_be_positive() -> None:
+    async with httpx.AsyncClient() as async_client:
+        with pytest.raises(ValueError, match="timeouts must be positive"):
+            ArxivProvider(async_client, request_timeout_seconds=0)
+
+
+@pytest.mark.asyncio
+async def test_busy_arxiv_provider_fails_without_waiting_for_locked_client() -> None:
+    fake_client = FakeArxivClient([_result(2025)])
+    async with httpx.AsyncClient() as async_client:
+        provider = ArxivProvider(
+            async_client,
+            arxiv_client=fake_client,
+            lock_timeout_seconds=0.01,
+        )
+        await provider._search_lock.acquire()
+        try:
+            with pytest.raises(ProviderError, match="busy"):
+                await provider.search("visual agents", 20)
+        finally:
+            provider._search_lock.release()
+
+    assert fake_client.searches == []
 
 
 @pytest.mark.asyncio

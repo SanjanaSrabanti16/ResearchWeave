@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Iterable
+from urllib.parse import urlsplit, urlunsplit
 
 from app.models.paper import Paper, PaperCandidate
 from app.services.normalization import (
@@ -20,6 +21,31 @@ def _unique(values: Iterable[str]) -> list[str]:
         if key not in seen:
             seen.add(key)
             result.append(value)
+    return result
+
+
+def _url_key(value: str) -> str:
+    parsed = urlsplit(value.strip())
+    hostname = (parsed.hostname or "").casefold().rstrip(".")
+    try:
+        port = parsed.port
+    except ValueError:
+        return value.strip().casefold()
+    netloc = hostname if port in {None, 443} else f"{hostname}:{port}"
+    path = parsed.path.rstrip("/") or "/"
+    return urlunsplit((parsed.scheme.casefold(), netloc, path, parsed.query, ""))
+
+
+def _unique_urls(values: Iterable[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if not value or not value.strip():
+            continue
+        key = _url_key(value)
+        if key not in seen:
+            seen.add(key)
+            result.append(value.strip())
     return result
 
 
@@ -96,7 +122,7 @@ class DeduplicationService:
 
     @staticmethod
     def _merge(group: list[PaperCandidate]) -> Paper:
-        def completeness(paper: PaperCandidate) -> tuple[int, int, int]:
+        def completeness(paper: PaperCandidate) -> tuple[int, int, int, int, int]:
             populated = sum(
                 value is not None
                 for value in (
@@ -110,7 +136,16 @@ class DeduplicationService:
                     paper.pdf_url,
                 )
             )
-            return populated, len(paper.abstract or ""), len(paper.authors)
+            publisher_venue = bool(
+                paper.venue and normalize_title(paper.venue) not in {"arxiv", "arxiv org"}
+            )
+            return (
+                int(normalize_doi(paper.doi) is not None),
+                int(publisher_venue),
+                populated,
+                len(paper.abstract or ""),
+                len(paper.authors),
+            )
 
         base = max(group, key=completeness)
 
@@ -123,10 +158,33 @@ class DeduplicationService:
 
         abstracts = [paper.abstract for paper in group if paper.abstract]
         abstract = max(abstracts, key=len) if abstracts else None
-        doi = next((value for paper in group if (value := normalize_doi(paper.doi))), None)
-        arxiv_id = next(
-            (value for paper in group if (value := normalize_arxiv_id(paper.arxiv_id))), None
+        doi = normalize_doi(base.doi) or next(
+            (value for paper in group if (value := normalize_doi(paper.doi))), None
         )
+        landing_urls = _unique_urls(
+            value
+            for paper in [base, *group]
+            for value in ([paper.url] if paper.url else []) + paper.alternate_urls
+        )
+        pdf_urls = _unique_urls(
+            value
+            for paper in [base, *group]
+            for value in ([paper.pdf_url] if paper.pdf_url else []) + paper.alternate_pdf_urls
+        )
+        arxiv_ids = _unique(
+            value
+            for paper in [base, *group]
+            for candidate in (
+                [paper.arxiv_id]
+                + paper.arxiv_ids
+                + ([paper.url] if paper.url else [])
+                + paper.alternate_urls
+                + ([paper.pdf_url] if paper.pdf_url else [])
+                + paper.alternate_pdf_urls
+            )
+            if (value := normalize_arxiv_id(candidate))
+        )
+        arxiv_id = arxiv_ids[0] if arxiv_ids else None
         citations = [paper.citation_count for paper in group if paper.citation_count is not None]
         authors = max((paper.authors for paper in group), key=len, default=[])
         sources = _unique(source for paper in group for source in paper.source_names)
@@ -140,10 +198,13 @@ class DeduplicationService:
             venue=first("venue"),
             doi=doi,
             arxiv_id=arxiv_id,
+            arxiv_ids=arxiv_ids,
             openalex_id=first("openalex_id"),
             semantic_scholar_id=first("semantic_scholar_id"),
-            url=first("url"),
-            pdf_url=first("pdf_url"),
+            url=landing_urls[0] if landing_urls else None,
+            alternate_urls=landing_urls[1:],
+            pdf_url=pdf_urls[0] if pdf_urls else None,
+            alternate_pdf_urls=pdf_urls[1:],
             citation_count=max(citations) if citations else None,
             source_names=sources,
         )

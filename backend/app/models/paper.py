@@ -18,16 +18,26 @@ class Paper(BaseModel):
     venue: str | None = None
     doi: str | None = None
     arxiv_id: str | None = None
+    arxiv_ids: list[str] = Field(default_factory=list)
     openalex_id: str | None = None
     semantic_scholar_id: str | None = None
     url: str | None = None
+    alternate_urls: list[str] = Field(default_factory=list)
     pdf_url: str | None = None
+    alternate_pdf_urls: list[str] = Field(default_factory=list)
     citation_count: int | None = Field(default=None, ge=0)
     source_names: list[str] = Field(default_factory=list)
     semantic_score: float | None = None
     reranker_score: float | None = None
 
-    @field_validator("authors", "source_names", mode="before")
+    @field_validator(
+        "authors",
+        "source_names",
+        "arxiv_ids",
+        "alternate_urls",
+        "alternate_pdf_urls",
+        mode="before",
+    )
     @classmethod
     def none_to_list(cls, value: Any) -> Any:
         return [] if value is None else value

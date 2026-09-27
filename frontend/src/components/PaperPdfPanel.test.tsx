@@ -2,7 +2,13 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { acquireAndParsePDF, APIError, extractPaperInsights, uploadAndParsePDF } from "../api/client";
+import {
+  acquireAndParsePDF,
+  APIError,
+  extractPaperInsights,
+  getLLMProviders,
+  uploadAndParsePDF,
+} from "../api/client";
 import type { InsightsResponse, Paper, ParsedPaper } from "../types/paper";
 import { PaperPdfPanel } from "./PaperPdfPanel";
 
@@ -13,6 +19,7 @@ vi.mock("../api/client", async (importOriginal) => {
     acquireAndParsePDF: vi.fn(),
     uploadAndParsePDF: vi.fn(),
     extractPaperInsights: vi.fn(),
+    getLLMProviders: vi.fn(),
   };
 });
 
@@ -79,6 +86,15 @@ describe("PaperPdfPanel", () => {
     vi.mocked(acquireAndParsePDF).mockReset();
     vi.mocked(uploadAndParsePDF).mockReset();
     vi.mocked(extractPaperInsights).mockReset();
+    vi.mocked(getLLMProviders).mockReset();
+    vi.mocked(getLLMProviders).mockResolvedValue({
+      default_provider: "ollama",
+      providers: [
+        { provider_id: "ollama", model: "qwen3:1.7b", configured: true, cloud: false },
+        { provider_id: "gemini", model: "gemini-3.5-flash", configured: false, cloud: true },
+        { provider_id: "evl_gemma", model: "gemma4", configured: false, cloud: true },
+      ],
+    });
   });
 
   it("shows upload fallback and previews a parsed upload", async () => {
@@ -157,9 +173,14 @@ describe("PaperPdfPanel", () => {
       extraction_version: "m2b-v1",
       cached: false,
       insights: {
+        paper_overview: [{
+          claim: "This complete overview explains the context, exact gap, approach, evaluation, and main takeaway without truncation.",
+          evidence: [],
+        }],
         research_problem: [],
         methods: [{ claim: "The paper uses a method.", evidence: [{ chunk_id: "chunk-1", quote: "Section evidence." }] }],
         key_contributions: [],
+        evaluation: [],
         main_findings: [],
         why_it_matters: [],
         target_audience: [],
@@ -175,13 +196,23 @@ describe("PaperPdfPanel", () => {
     await user.click(await screen.findByRole("button", { name: "Extract grounded insights" }));
 
     expect(await screen.findByText("The paper uses a method.")).toBeInTheDocument();
-    for (const heading of ["Problem", "Methods", "Contributions", "Findings", "Why It Matters", "Audience", "Limitations", "Future Work"]) {
+    const completeOverview =
+      "This complete overview explains the context, exact gap, approach, evaluation, and main takeaway without truncation.";
+    expect(completeOverview.endsWith("...")).toBe(false);
+    const overview = screen.getByText(completeOverview);
+    expect(overview.textContent).toBe(completeOverview);
+    expect(overview).toHaveClass("paper-overview-text");
+    expect(
+      screen.getByText("The paper does not explicitly state study limitations."),
+    ).toBeInTheDocument();
+    for (const heading of ["Paper Overview", "Problem", "Methods", "Contributions", "Evaluation", "Findings", "Why It Matters", "Audience", "Limitations", "Future Work"]) {
       expect(screen.getByRole("heading", { name: heading })).toBeInTheDocument();
     }
     await user.click(screen.getByText("Evidence (1)"));
     expect(screen.getByText("“Section evidence.”")).toBeInTheDocument();
     expect(screen.getByText("chunk-1")).toBeInTheDocument();
-    expect(extractPaperInsights).toHaveBeenCalledWith(document, expect.any(Function));
+    expect(screen.getByRole("option", { name: "Google Gemini (unavailable)" })).toBeDisabled();
+    expect(extractPaperInsights).toHaveBeenCalledWith(document, expect.any(Function), "ollama");
   });
 
   it("keeps parsed metadata visible while showing extraction progress", async () => {
@@ -212,11 +243,113 @@ describe("PaperPdfPanel", () => {
       extraction_version: "m2b-v5-selective",
       cached: false,
       insights: {
-        research_problem: [], methods: [], key_contributions: [], main_findings: [],
+        paper_overview: [], research_problem: [], methods: [], key_contributions: [],
+        evaluation: [], main_findings: [],
         why_it_matters: [], target_audience: [], limitations: [], future_work: [],
       },
     });
-    expect(await screen.findByText(/Grounded with qwen3:4b/)).toBeInTheDocument();
+    expect(await screen.findByText(/Grounded with Local Ollama \(qwen3:4b\)/)).toBeInTheDocument();
+  });
+
+  it("sends an explicitly selected configured Gemini provider", async () => {
+    vi.mocked(acquireAndParsePDF).mockResolvedValue({
+      status: "arxiv",
+      paper_id: "paper-1",
+      document,
+      message: "Parsed successfully.",
+    });
+    vi.mocked(getLLMProviders).mockResolvedValue({
+      default_provider: "ollama",
+      providers: [
+        { provider_id: "ollama", model: "qwen3:1.7b", configured: true, cloud: false },
+        { provider_id: "gemini", model: "gemini-3.5-flash", configured: true, cloud: true },
+      ],
+    });
+    vi.mocked(extractPaperInsights).mockResolvedValue({
+      paper_id: "paper-1",
+      document_fingerprint: "b".repeat(64),
+      model: "gemini-3.5-flash",
+      extraction_version: "m2-final-v1-evidence-ledger",
+      cached: false,
+      insights: {
+        paper_overview: [], research_problem: [], methods: [], key_contributions: [],
+        evaluation: [], main_findings: [], why_it_matters: [], target_audience: [],
+        limitations: [], future_work: [],
+      },
+    });
+    const user = userEvent.setup();
+    render(<PaperPdfPanel paper={paper} />);
+
+    await user.click(screen.getByRole("button", { name: "Get PDF" }));
+    await user.selectOptions(await screen.findByLabelText("Analysis provider"), "gemini");
+    expect(screen.getByText(/sends selected paper text to Google/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Extract grounded insights" }));
+
+    expect(extractPaperInsights).toHaveBeenCalledWith(document, expect.any(Function), "gemini");
+  });
+
+  it("shows unavailable EVL Gemma as disabled", async () => {
+    vi.mocked(acquireAndParsePDF).mockResolvedValue({
+      status: "arxiv",
+      paper_id: "paper-1",
+      document,
+      message: "Parsed successfully.",
+    });
+    const user = userEvent.setup();
+    render(<PaperPdfPanel paper={paper} />);
+
+    await user.click(screen.getByRole("button", { name: "Get PDF" }));
+
+    expect(
+      await screen.findByRole("option", { name: "EVL Gemma (unavailable)" }),
+    ).toBeDisabled();
+  });
+
+  it("sends an explicitly selected configured EVL Gemma provider", async () => {
+    vi.mocked(acquireAndParsePDF).mockResolvedValue({
+      status: "arxiv",
+      paper_id: "paper-1",
+      document,
+      message: "Parsed successfully.",
+    });
+    vi.mocked(getLLMProviders).mockResolvedValue({
+      default_provider: "ollama",
+      providers: [
+        { provider_id: "ollama", model: "qwen3:1.7b", configured: true, cloud: false },
+        { provider_id: "gemini", model: "gemini-3.5-flash", configured: true, cloud: true },
+        { provider_id: "evl_gemma", model: "gemma4", configured: true, cloud: true },
+      ],
+    });
+    vi.mocked(extractPaperInsights).mockResolvedValue({
+      paper_id: "paper-1",
+      document_fingerprint: "b".repeat(64),
+      model: "gemma4",
+      extraction_version: "m2-final-v1-evidence-ledger",
+      cached: false,
+      insights: {
+        paper_overview: [], research_problem: [], methods: [], key_contributions: [],
+        evaluation: [], main_findings: [], why_it_matters: [], target_audience: [],
+        limitations: [], future_work: [],
+      },
+    });
+    const user = userEvent.setup();
+    render(<PaperPdfPanel paper={paper} />);
+
+    await user.click(screen.getByRole("button", { name: "Get PDF" }));
+    await screen.findByRole("option", { name: "EVL Gemma" });
+    const providerLabels = screen.getAllByRole("option").map((option) => option.textContent);
+    expect(providerLabels).toEqual(["Local Ollama", "Google Gemini", "EVL Gemma"]);
+    expect(new Set(providerLabels).size).toBe(providerLabels.length);
+    await user.selectOptions(await screen.findByLabelText("Analysis provider"), "evl_gemma");
+    expect(screen.getByText(/sends selected paper text to the EVL inference service/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Extract grounded insights" }));
+
+    expect(extractPaperInsights).toHaveBeenCalledWith(
+      document,
+      expect.any(Function),
+      "evl_gemma",
+    );
+    expect(await screen.findByText(/Grounded with EVL Gemma \(gemma4\)/)).toBeInTheDocument();
   });
 
   it("reports local Ollama failure without showing unsupported insights", async () => {

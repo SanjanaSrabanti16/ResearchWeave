@@ -6,9 +6,21 @@ from typing import Annotated
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import StreamingResponse
 
+from app.llm import (
+    LLMAuthenticationError,
+    LLMOutputError,
+    LLMProviderUnavailableError,
+    LLMRateLimitError,
+    LLMTimeoutError,
+    UnknownLLMProviderError,
+)
 from app.models.api import HealthResponse, SearchRequest, SearchResponse
 from app.models.document import PDFAcquisitionRequest, PDFProcessingResponse
-from app.models.insights import InsightsRequest, InsightsResponse
+from app.models.insights import (
+    InsightsRequest,
+    InsightsResponse,
+    LLMProviderStatusResponse,
+)
 from app.parsers import PDFParserError, PDFParserUnavailableError
 from app.services.insight_service import (
     InsightInputError,
@@ -17,6 +29,7 @@ from app.services.insight_service import (
     OllamaTimeoutError,
     OllamaUnavailableError,
 )
+from app.services.paper_understanding_service import PaperUnderstandingService
 from app.services.pdf_service import PDFAcquisitionService
 from app.services.pdf_upload import read_pdf_upload
 from app.services.pdf_validation import PDFTooLargeError, PDFValidationError
@@ -34,7 +47,7 @@ def get_pdf_service(request: Request) -> PDFAcquisitionService:
     return request.app.state.pdf_service
 
 
-def get_insight_service(request: Request) -> InsightService:
+def get_insight_service(request: Request) -> PaperUnderstandingService | InsightService:
     return request.app.state.insight_service
 
 
@@ -104,19 +117,37 @@ async def upload_pdf(
 @router.post("/api/papers/insights", response_model=InsightsResponse)
 async def extract_insights(payload: InsightsRequest, request: Request) -> InsightsResponse:
     try:
-        return await get_insight_service(request).extract(payload.document)
+        service = get_insight_service(request)
+        if isinstance(service, PaperUnderstandingService):
+            return await service.extract(payload.document, provider_id=payload.provider)
+        return await service.extract(payload.document)
     except InsightInputError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
         ) from exc
-    except OllamaUnavailableError as exc:
+    except UnknownLLMProviderError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except LLMAuthenticationError as exc:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
+    except LLMRateLimitError as exc:
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc)) from exc
+    except (OllamaUnavailableError, LLMProviderUnavailableError) as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
         ) from exc
-    except OllamaTimeoutError as exc:
+    except (OllamaTimeoutError, LLMTimeoutError) as exc:
         raise HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail=str(exc)) from exc
-    except InsightOutputError as exc:
+    except (InsightOutputError, LLMOutputError) as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+
+@router.get("/api/llm/providers", response_model=LLMProviderStatusResponse)
+async def llm_provider_status(request: Request) -> LLMProviderStatusResponse:
+    registry = request.app.state.llm_registry
+    return LLMProviderStatusResponse(
+        default_provider=registry.default_provider,
+        providers=registry.statuses(),
+    )
 
 
 @router.post("/api/papers/insights/stream")
@@ -131,13 +162,26 @@ async def stream_insights(payload: InsightsRequest, request: Request) -> Streami
 
         async def run() -> None:
             try:
-                result = await service.extract(payload.document, on_progress=progress)
+                if isinstance(service, PaperUnderstandingService):
+                    result = await service.extract(
+                        payload.document,
+                        provider_id=payload.provider,
+                        on_progress=progress,
+                    )
+                else:
+                    result = await service.extract(payload.document, on_progress=progress)
                 await queue.put({"type": "result", "data": result.model_dump(mode="json")})
             except (
                 InsightInputError,
                 OllamaUnavailableError,
                 OllamaTimeoutError,
                 InsightOutputError,
+                UnknownLLMProviderError,
+                LLMAuthenticationError,
+                LLMRateLimitError,
+                LLMProviderUnavailableError,
+                LLMTimeoutError,
+                LLMOutputError,
             ) as exc:
                 await queue.put({"type": "error", "message": str(exc)})
             except Exception:

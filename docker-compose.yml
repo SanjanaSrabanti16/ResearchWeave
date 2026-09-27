@@ -17,6 +17,12 @@ services:
       GROBID_PARSER_VERSION: 0.9.1-crf+frontmatter-v1
       OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3:1.7b}
       OLLAMA_BASE_URL: ${OLLAMA_DOCKER_BASE_URL:-http://host.docker.internal:11434}
+      LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.8-flash}
+      EVL_GEMMA_API_KEY: ${EVL_GEMMA_API_KEY:-}
+      EVL_GEMMA_BASE_URL: ${EVL_GEMMA_BASE_URL:-https://sage200.evl.uic.edu}
+      EVL_GEMMA_MODEL: ${EVL_GEMMA_MODEL:-gemma4}
     volumes:
       - ./backend/data:/app/data
       - huggingface-cache:/root/.cache/huggingface

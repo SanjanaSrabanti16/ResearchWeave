@@ -31,6 +31,47 @@ def test_openalex_normalization_reconstructs_abstract() -> None:
     assert paper.authors == ["Ada Author"]
 
 
+def test_openalex_normalization_preserves_multiple_oa_locations() -> None:
+    paper = OpenAlexProvider.normalize(
+        {
+            "id": "https://openalex.org/W2",
+            "display_name": "Multiple OA Copies",
+            "primary_location": {
+                "landing_page_url": "https://publisher.example/article",
+                "pdf_url": "https://publisher.example/article.pdf",
+                "source": {"display_name": "Journal"},
+            },
+            "best_oa_location": {
+                "landing_page_url": "https://repository.example/item",
+                "pdf_url": "https://repository.example/item.pdf",
+            },
+            "locations": [
+                {
+                    "landing_page_url": "https://repository.example/item",
+                    "pdf_url": "https://repository.example/item.pdf",
+                },
+                {
+                    "landing_page_url": "https://second.example/item",
+                    "pdf_url": "https://second.example/item.pdf",
+                },
+            ],
+        }
+    )
+
+    assert paper is not None
+    assert paper.url == "https://publisher.example/article"
+    assert paper.alternate_urls == [
+        "https://repository.example/item",
+        "https://second.example/item",
+        "https://openalex.org/W2",
+    ]
+    assert paper.pdf_url == "https://repository.example/item.pdf"
+    assert paper.alternate_pdf_urls == [
+        "https://publisher.example/article.pdf",
+        "https://second.example/item.pdf",
+    ]
+
+
 def test_semantic_scholar_normalization() -> None:
     paper = SemanticScholarProvider.normalize(
         {

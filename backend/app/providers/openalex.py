@@ -52,6 +52,23 @@ class OpenAlexProvider(SearchProvider):
         best_oa = (
             item.get("best_oa_location") if isinstance(item.get("best_oa_location"), dict) else {}
         )
+        other_locations = item.get("locations") if isinstance(item.get("locations"), list) else []
+        locations = [primary, best_oa, *(row for row in other_locations if isinstance(row, dict))]
+
+        def unique_location_values(key: str, ordered: list[dict[str, Any]]) -> list[str]:
+            values: list[str] = []
+            seen: set[str] = set()
+            for location in ordered:
+                value = clean_text(location.get(key))
+                if value and value.casefold() not in seen:
+                    seen.add(value.casefold())
+                    values.append(value)
+            return values
+
+        landing_urls = unique_location_values("landing_page_url", locations)
+        pdf_urls = unique_location_values("pdf_url", [best_oa, primary, *locations[2:]])
+        if openalex_id and openalex_id.casefold() not in {url.casefold() for url in landing_urls}:
+            landing_urls.append(openalex_id)
         year = item.get("publication_year")
         if not isinstance(year, int):
             year = None
@@ -68,8 +85,10 @@ class OpenAlexProvider(SearchProvider):
             venue=clean_text(source.get("display_name")),
             doi=doi,
             openalex_id=openalex_id,
-            url=clean_text(primary.get("landing_page_url") or openalex_id),
-            pdf_url=clean_text(best_oa.get("pdf_url") or primary.get("pdf_url")),
+            url=landing_urls[0] if landing_urls else None,
+            alternate_urls=landing_urls[1:],
+            pdf_url=pdf_urls[0] if pdf_urls else None,
+            alternate_pdf_urls=pdf_urls[1:],
             citation_count=citations,
             source_names=[cls.name],
         )

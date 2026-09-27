@@ -263,6 +263,31 @@ def test_v16_23_conclusion_restatement_of_outcome_is_a_finding() -> None:
     assert _explicit("main_findings", "Conclusion", evidence, evidence)
 
 
+def test_qualitative_case_study_diagnosis_is_a_finding() -> None:
+    evidence = "The case-study diagnosis identified architectural weaknesses in error recovery."
+    assert _explicit("main_findings", "Case Study Analysis", evidence, evidence)
+
+
+def test_qualitative_absent_subsystem_is_a_finding() -> None:
+    evidence = "The learning and coordination subsystems are absent from the evaluated framework."
+    assert _explicit("main_findings", "Evaluation", evidence, evidence)
+
+
+def test_related_work_qualitative_observation_is_not_current_finding() -> None:
+    evidence = "Prior work identified architectural weaknesses in error recovery."
+    assert not _explicit("main_findings", "Related Work", evidence, evidence)
+
+
+def test_proposed_capability_is_not_a_qualitative_finding() -> None:
+    evidence = "The proposed framework can identify architectural weaknesses in error recovery."
+    assert not _explicit("main_findings", "Methods", evidence, evidence)
+
+
+def test_speculative_discussion_is_not_a_qualitative_finding() -> None:
+    evidence = "The framework may lack robust error recovery in deployments not evaluated here."
+    assert not _explicit("main_findings", "Discussion", evidence, evidence)
+
+
 def test_v16_24_limitation_section_reserves_concrete_sentence() -> None:
     sentence = "The prototype does not support concurrent updates from multiple clients."
     assert sentence in _reserved("Limitations", sentence)
@@ -338,6 +363,20 @@ def test_v16_37_completed_action_is_not_future_work() -> None:
 
 def test_v16_38_prior_paper_plan_is_not_current_future_work() -> None:
     assert not supports_future_work("Previous work plans to integrate additional datasets.")
+
+
+def test_future_efforts_should_prioritize_is_author_supported_future_work() -> None:
+    assert supports_future_work(
+        "Future efforts should prioritize defining standardized security metrics."
+    )
+
+
+def test_case_study_receiver_and_eavesdropper_outcome_is_a_finding() -> None:
+    evidence = (
+        "The legitimate receiver can recover the secret image, while the eavesdropper intercepts "
+        "an image with wrong content."
+    )
+    assert _explicit("main_findings", "Results and Analysis", evidence, evidence)
 
 
 def test_v16_39_plain_contribution_alone_is_not_why_it_matters() -> None:

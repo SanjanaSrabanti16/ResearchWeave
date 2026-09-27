@@ -32,9 +32,11 @@ from app.services.insight_selector import (
 
 EXTRACTION_VERSION = "m2b-v16-trust-hardening"
 COVERAGE_LIMITS = {
+    "paper_overview": 1,
     "research_problem": 4,
     "methods": 8,
     "key_contributions": 8,
+    "evaluation": 8,
     "main_findings": 10,
     "why_it_matters": 5,
     "target_audience": 5,
@@ -289,7 +291,12 @@ def _content_words(text: str) -> set[str]:
     return words
 
 
-_SYNTHESIS_FIELDS = {"research_problem", "why_it_matters", "target_audience"}
+_SYNTHESIS_FIELDS = {
+    "paper_overview",
+    "research_problem",
+    "why_it_matters",
+    "target_audience",
+}
 _SYNTHESIS_GENERIC_WORDS = {
     "approach",
     "can",
@@ -440,15 +447,16 @@ _EXTERNAL_AUTHOR_ACTION = re.compile(
 _CURRENT_CONTRIBUTION_ACTION = re.compile(
     r"\b(?:we|this\s+(?:work|paper|study|analysis))\s+"
     r"(?:introduce|propose|present|develop|create|build|contribute|provide|release|"
-    r"collect|compile|conduct|analy[sz]e|characterize|demonstrate|design|implement|"
-    r"establish|formulate|show|report)\w*\b|"
+    r"collect|compile|conduct|analy[sz]e|characterize|demonstrate|design|identify|implement|"
+    r"establish|formulate|outline|review|show|summarize|survey|report)\w*\b|"
     r"\b(?:our|the\s+proposed)\s+(?:dataset|taxonomy|design\s+space|analysis|survey|"
     r"framework|system|method|approach|model|algorithm|tool|study|evaluation)\b",
     re.I,
 )
 _DECLARED_CONTRIBUTION = re.compile(
     r"\b(?:(?:our|the)\s+)?(?:main\s+|key\s+|primary\s+)?contributions?\s+"
-    r"(?:are|include|consist(?:s)?\s+of|of\s+this\s+work\s+(?:are|include))\b|"
+    r"(?:are(?:\s+(?:outlined|listed))?(?:\s+as)?|include|consist(?:s)?\s+of|"
+    r"of\s+this\s+work\s+(?:are|include))\b|"
     r"\bwe\s+make\s+the\s+following\s+contributions?\b|"
     r"\bthis\s+work\s+contributes?\b",
     re.I,
@@ -829,6 +837,28 @@ def _explicit_audience_supported(evidence: str) -> bool:
     )
 
 
+_OPEN_CHALLENGE_DISCLOSURE = re.compile(
+    r"\b(?:does|do)\s+not\s+explicitly\s+(?:frame|state|present)\b.{0,80}"
+    r"\blimitations?\b.{0,100}\b(?:open|unresolved)\s+challenges?\b",
+    re.I | re.S,
+)
+_OPEN_CHALLENGE_EVIDENCE = re.compile(
+    r"\b(?:remains?\s+(?:an?\s+)?challenge|unresolved\s+challenges?|open\s+"
+    r"(?:issues?|challenges?|questions?)|requires?\s+(?:careful\s+)?consideration|"
+    r"it\s+is\s+crucial|is\s+critical)\b",
+    re.I,
+)
+
+
+def _open_challenge_reframing(claim: str, evidence: str) -> bool:
+    """Allow an honest non-limitation label only for explicitly grounded open challenges."""
+    return bool(
+        _OPEN_CHALLENGE_DISCLOSURE.search(claim)
+        and _OPEN_CHALLENGE_EVIDENCE.search(evidence)
+        and not _support_attributed_to_prior_work(claim, evidence)
+    )
+
+
 def explicit_claim_supported(
     item: InsightClaim,
     field: str,
@@ -878,10 +908,14 @@ def explicit_claim_rejection_reason(
             return "finding_without_outcome"
     if field == "future_work" and not supports_future_work(evidence):
         return "future_work_guard"
+    open_challenge_reframing = field == "limitations" and _open_challenge_reframing(
+        item.claim, evidence
+    )
     if (
         field == "limitations"
         and _CLAIM_NEGATION.search(item.claim) is not None
         and _EXPLICIT_NEGATIVE_LIMITATION.search(evidence) is None
+        and not open_challenge_reframing
     ):
         return "limitation_not_explicit"
     if not _entity_consistent(item.claim, evidence):
@@ -903,7 +937,11 @@ def explicit_claim_rejection_reason(
         and _EXPLICIT_NEGATIVE_LIMITATION.search(evidence) is not None
         and bool(_semantic_concepts(item.claim) & _semantic_concepts(evidence))
     )
-    if _adds_unsupported_detail(item.claim, evidence) and not explicit_negative_limitation:
+    if (
+        _adds_unsupported_detail(item.claim, evidence)
+        and not explicit_negative_limitation
+        and not open_challenge_reframing
+    ):
         return "unsupported_attribute_or_detail"
     return None
 
@@ -927,7 +965,12 @@ def synthesis_claim_rejection_reason(item: InsightClaim, field: str) -> str | No
     evidence_concepts = _semantic_concepts(evidence_text)
     if not claim_concepts:
         return "missing_semantic_concepts"
-    thresholds = {"research_problem": 0.35, "why_it_matters": 0.55, "target_audience": 0.30}
+    thresholds = {
+        "paper_overview": 0.35,
+        "research_problem": 0.35,
+        "why_it_matters": 0.55,
+        "target_audience": 0.30,
+    }
     coverage = len(claim_concepts & evidence_concepts) / len(claim_concepts)
     if coverage < thresholds[field]:
         return "semantic_concept_coverage"

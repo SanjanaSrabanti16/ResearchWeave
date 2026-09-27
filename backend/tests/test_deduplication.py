@@ -127,3 +127,103 @@ def test_same_arxiv_id_merges_even_when_titles_differ_and_dois_conflict() -> Non
         ]
     )
     assert len(result) == 1
+
+
+def test_publisher_canonical_record_preserves_arxiv_acquisition_identity() -> None:
+    result = DeduplicationService().deduplicate(
+        [
+            paper(
+                "Published Paper Title",
+                "openalex",
+                doi="https://doi.org/10.1000/PAPER",
+                publication_year=2025,
+                venue="Journal of Reliable Results",
+                url="https://publisher.example/article",
+            ),
+            paper(
+                "Published Paper Title",
+                "arxiv",
+                arxiv_id="arXiv:2501.01234v2",
+                venue="arXiv",
+                url="https://arxiv.org/abs/2501.01234v2",
+                pdf_url="https://arxiv.org/pdf/2501.01234v2.pdf",
+                abstract="A much longer preprint abstract that must not make arXiv canonical.",
+            ),
+        ]
+    )
+
+    assert len(result) == 1
+    merged = result[0]
+    assert merged.title == "Published Paper Title"
+    assert merged.venue == "Journal of Reliable Results"
+    assert merged.publication_year == 2025
+    assert merged.doi == "10.1000/paper"
+    assert merged.arxiv_id == "2501.01234"
+    assert merged.arxiv_ids == ["2501.01234"]
+    assert set(merged.source_names) == {"openalex", "arxiv"}
+    assert merged.url == "https://publisher.example/article"
+    assert merged.alternate_urls == ["https://arxiv.org/abs/2501.01234v2"]
+    assert merged.pdf_url == "https://arxiv.org/pdf/2501.01234v2.pdf"
+
+
+def test_merge_preserves_and_deduplicates_alternate_urls() -> None:
+    result = DeduplicationService().deduplicate(
+        [
+            paper(
+                "Same Work",
+                "openalex",
+                doi="10.1/same",
+                url="https://publisher.example/work/",
+                alternate_urls=["https://repository.example/item"],
+                pdf_url="https://repository.example/work.pdf",
+                alternate_pdf_urls=["https://mirror.example/work.pdf"],
+            ),
+            paper(
+                "Same Work",
+                "semantic_scholar",
+                doi="https://doi.org/10.1/SAME",
+                url="https://publisher.example/work",
+                alternate_urls=["https://repository.example/item"],
+                pdf_url="https://repository.example/work.pdf",
+                alternate_pdf_urls=["https://mirror.example/work.pdf"],
+            ),
+        ]
+    )[0]
+
+    assert result.url == "https://publisher.example/work/"
+    assert result.alternate_urls == ["https://repository.example/item"]
+    assert result.pdf_url == "https://repository.example/work.pdf"
+    assert result.alternate_pdf_urls == ["https://mirror.example/work.pdf"]
+
+
+def test_merge_preserves_all_normalized_arxiv_ids_for_same_doi() -> None:
+    merged = DeduplicationService().deduplicate(
+        [
+            paper("Shared DOI", "first", doi="10.1/shared", arxiv_id="2401.00001v1"),
+            paper("Shared DOI", "second", doi="10.1/shared", arxiv_id="2402.00002v2"),
+        ]
+    )[0]
+
+    assert merged.arxiv_id == "2401.00001"
+    assert merged.arxiv_ids == ["2401.00001", "2402.00002"]
+
+
+def test_poorer_late_duplicate_does_not_replace_canonical_metadata() -> None:
+    merged = DeduplicationService().deduplicate(
+        [
+            paper(
+                "Complete Publisher Title",
+                "openalex",
+                doi="10.1/canonical",
+                venue="Journal",
+                publication_year=2024,
+                authors=["Ada Author"],
+            ),
+            paper("Incomplete title", "arxiv", doi="10.1/canonical", arxiv_id="2401.12345"),
+        ]
+    )[0]
+
+    assert merged.title == "Complete Publisher Title"
+    assert merged.venue == "Journal"
+    assert merged.publication_year == 2024
+    assert merged.authors == ["Ada Author"]

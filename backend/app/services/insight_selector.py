@@ -129,7 +129,14 @@ HEADING_SIGNALS = {
     "discussion_limitations": ("discussion", "conclusion"),
     "discussion_deployment": ("discussion", "conclusion"),
     "limitations": ("limitation", "constraint", "threat"),
-    "future_work": ("future work", "future direction", "further work"),
+    "future_work": (
+        "future work",
+        "future direction",
+        "further work",
+        "open research",
+        "open issues",
+        "outlook",
+    ),
     "audience": ("evaluation", "expert feedback", "deployment", "users", "participants"),
     "gaps": ("limitation", "discussion", "conclusion", "future", "open question"),
 }
@@ -225,6 +232,7 @@ TEXT_SIGNALS = {
         r"direction))\b",
         r"\b(?:further (?:work|investigation|deployment)|additional data|broader deployment|"
         r"we (?:plan|intend|hope|aim) (?:to|on)|we (?:will|envision)|"
+        r"future efforts? should|open research (?:issues?|questions?|directions?)|"
         r"marked .{0,80} future|could be extended|can extend)\b",
     ),
     "audience": (
@@ -248,7 +256,9 @@ _FUTURE_ACTION_SIGNALS = (
     r"plan\s+(?:to|on)\s+\w+|intend\s+to\s+\w+|aim\s+to\s+\w+|"
     r"envision(?:\s+\w+){0,3}|hope\s+to\s+\w+|seek\s+to\s+\w+)\b",
     r"\bfuture\s+(?:work|research|directions?|extensions?)\s+"
-    r"(?:will|could|may|might|includes?|will include)\b",
+    r"(?:will|could|may|might|can|should|includes?|will include)\b",
+    r"\bfuture\s+efforts?\s+should\s+(?:prioritize|focus|establish|develop|conduct|"
+    r"define|evaluate|investigate|build|create|implement)\b",
     r"\b(?:marked .{0,80} future|could be extended|can extend)\b",
 )
 _NON_AUTHOR_FUTURE_SIGNALS = (
@@ -287,6 +297,11 @@ _RESULT_OBSERVATION_SIGNALS = (
     r"(?:found|revealed|showed|identified|reported|indicated)\b",
     r"\b(?:accuracy|runtime|latency|error|score|quality|performance)\s+"
     r"(?:increased|decreased|improved|declined|was|were|is|are)\b",
+    r"\b(?:receiver|system|model|method|approach|agent|defense|mechanism)s?\s+"
+    r"(?:can\s+|could\s+)?(?:recover(?:ed|s)?|detect(?:ed|s)?|prevent(?:ed|s)?|"
+    r"generate(?:d|s)?|produce(?:d|s)?|intercept(?:ed|s)?|block(?:ed|s)?)\b",
+    r"\b(?:prevent(?:ed|s)?|caus(?:e|ed|es|ing))\b.{0,100}\b"
+    r"(?:reconstruction|collapse|failure|error|incorrect|wrong)\b",
 )
 _FINDING_HEADING = re.compile(
     r"\b(?:evaluation|results?|findings?|experiments?|case stud(?:y|ies)|analysis|"
@@ -331,6 +346,18 @@ _DIRECTIONAL_OUTCOME = re.compile(
     r"outperform(?:s|ed)?|exceed(?:s|ed)?|surpass(?:es|ed)?)\b",
     re.I,
 )
+_QUALITATIVE_DIAGNOSTIC = re.compile(
+    r"\b(?:diagnos(?:e|ed|is|tic)|systemic fragilit(?:y|ies)|architectural weaknesses?|"
+    r"failure modes?|workflow problems?)\b|"
+    r"\b(?:framework|system|model|architecture|subsystems?|capabilit(?:y|ies))\s+"
+    r"(?:lacks?|has no|have no|is absent|are absent|was absent|were absent)\b|"
+    r"\b(?:lacks?|absent)\s+(?:mechanisms?|capabilit(?:y|ies)|subsystems?)\b",
+    re.I,
+)
+_SPECULATIVE_FINDING = re.compile(
+    r"\b(?:may|might|could|possibly|potentially|we (?:hypothesi[sz]e|speculate))\b",
+    re.I,
+)
 
 
 def supports_future_work(text: str) -> bool:
@@ -344,6 +371,8 @@ def supports_finding(text: str, headings: tuple[str, ...] = ()) -> bool:
     """Require current-paper result/observation evidence, including qualitative findings."""
     if _HOW_TO_DEMONSTRATION.search(text):
         return False
+    if _CAPABILITY_ONLY.search(text):
+        return False
     if any(re.search(signal, text, re.I) for signal in _RESULT_OBSERVATION_SIGNALS):
         return True
     if (
@@ -352,9 +381,9 @@ def supports_finding(text: str, headings: tuple[str, ...] = ()) -> bool:
         or _DIRECTIONAL_OUTCOME.search(text)
     ):
         return True
+    if _QUALITATIVE_DIAGNOSTIC.search(text) and not _SPECULATIVE_FINDING.search(text):
+        return True
     if any(re.search(signal, text, re.I) for signal in _METHOD_DESCRIPTION_SIGNALS):
-        return False
-    if _CAPABILITY_ONLY.search(text):
         return False
     if _EVALUATION_SETUP_ONLY.search(text):
         return False
@@ -370,19 +399,36 @@ class EvidenceSelection:
     priority_passages: dict[str, list[str]] = field(default_factory=dict)
 
 
-_LIST_MARKER = re.compile(r"(?<!\w)(?:\(\d{1,3}\)|\d{1,3}[.)]|[a-z][.)]|[•▪◦])\s+", re.I)
+_LIST_MARKER = re.compile(
+    r"(?<!\w)(?:\(\d{1,3}\)|\d{1,3}[.)]|[a-z][.)]|[\u2022\u25aa\u25e6\ufffd])\s+",
+    re.I,
+)
 
 
 _CONTRIBUTION_HEADER = re.compile(
     r"\b(?:(?:our|the)\s+)?(?:main\s+|key\s+|primary\s+)?contributions?\s+"
-    r"(?:are|include|is|consist(?:s)?\s+of|of\s+this\s+work\s+(?:are|include))\b|"
+    r"(?:are(?:\s+(?:outlined|listed))?(?:\s+as)?|include|is|consist(?:s)?\s+of|"
+    r"of\s+this\s+work\s+(?:are|include))\b|"
     r"\bwe\s+make\s+the\s+following\s+contributions?\b|"
     r"\bthis\s+work\s+contributes?\b",
     re.I,
 )
 _BARE_CONTRIBUTION_HEADER = re.compile(
     r"^\s*(?:(?:our|the)\s+)?(?:main\s+|key\s+|primary\s+)?contributions?\s+"
-    r"(?:are|include|are\s+as\s+follows|include\s+the\s+following)?\s*[.:]?\s*$",
+    r"(?:are(?:\s+(?:outlined|listed))?(?:\s+as(?:\s+follows)?)?|"
+    r"include(?:\s+the\s+following)?)?\s*[.:]?\s*$",
+    re.I,
+)
+
+_RELATED_WORK_HEADING = re.compile(
+    r"\b(?:related work|background|prior work|previous work|literature review)\b",
+    re.I,
+)
+_CURRENT_AUTHOR_CONTRIBUTION_ITEM = re.compile(
+    r"^\s*[\u2022\u25aa\u25e6\ufffd*\-]?\s*we\s+"
+    r"(?:analy[sz]e|characterize|collect|compile|conduct|contribute|create|demonstrate|"
+    r"design|develop|establish|formulate|identify|implement|introduce|outline|present|"
+    r"propose|provide|release|report|review|show|summarize|survey)\w*\b",
     re.I,
 )
 
@@ -424,6 +470,28 @@ def _contribution_list_items(text: str, *, limit: int = 6) -> list[str]:
     return deduplicated[:limit]
 
 
+def explicit_contribution_chunk_ids(document: ParsedPaper) -> tuple[list[str], list[str]]:
+    """Find current-paper contribution headers and adjacent list items across GROBID chunks."""
+    headers: list[str] = []
+    items: list[str] = []
+    for section in document.sections:
+        heading = section.heading or ""
+        if _RELATED_WORK_HEADING.search(heading):
+            continue
+        chunks = [chunk for chunk in section.chunks if chunk.text.strip()]
+        for index, chunk in enumerate(chunks):
+            if _CONTRIBUTION_HEADER.search(chunk.text) is None:
+                continue
+            headers.append(chunk.id)
+            if _contribution_list_items(chunk.text):
+                items.append(chunk.id)
+            for following in chunks[index + 1 : index + 9]:
+                if _CURRENT_AUTHOR_CONTRIBUTION_ITEM.search(following.text) is None:
+                    break
+                items.append(following.id)
+    return list(dict.fromkeys(headers)), list(dict.fromkeys(items))
+
+
 def _passages(text: str) -> list[str]:
     passages = []
     for sentence in re.split(r"(?<=[.!?])\s+(?=[A-Z])", text):
@@ -433,12 +501,15 @@ def _passages(text: str) -> list[str]:
 
 _BOUNDARY_HEADING = re.compile(
     r"\b(?:limitations?|constraints?|discussion|conclusions?|future\s+"
-    r"(?:work|directions?|research|extensions?))\b",
+    r"(?:work|directions?|research|extensions?)|open\s+(?:issues?|questions?|research)|"
+    r"outlooks?)\b",
     re.I,
 )
 _EXPLICIT_LIMITATION_HEADING = re.compile(r"\b(?:limitations?|constraints?|threats?)\b", re.I)
 _EXPLICIT_FUTURE_HEADING = re.compile(
-    r"\bfuture\s+(?:work|directions?|research|extensions?)\b", re.I
+    r"\b(?:future\s+(?:work|directions?|research|extensions?)|"
+    r"open\s+(?:issues?|questions?|research)|outlooks?)\b",
+    re.I,
 )
 _BARE_BOUNDARY_PASSAGE = re.compile(
     r"^\s*(?:our\s+)?(?:main\s+|key\s+)?(?:limitations?|constraints?|future\s+"
@@ -701,11 +772,10 @@ def select_evidence(document: ParsedPaper) -> EvidenceSelection:
                 pools[pool].append(chunk_id)
                 headings.add(heading)
 
-    pools["explicit_contributions"] = [
-        chunk_id
-        for _heading, chunk_id, text, _is_abstract in records
-        if _contribution_list_items(text)
-    ][: POOL_BUDGETS["explicit_contributions"]]
+    contribution_headers, contribution_items = explicit_contribution_chunk_ids(document)
+    pools["explicit_contributions"] = list(
+        dict.fromkeys([*contribution_headers, *contribution_items])
+    )[: POOL_BUDGETS["explicit_contributions"]]
 
     gap_records = [
         record

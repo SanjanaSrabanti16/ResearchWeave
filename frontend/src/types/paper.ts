@@ -8,10 +8,13 @@ export interface Paper {
   venue: string | null;
   doi: string | null;
   arxiv_id: string | null;
+  arxiv_ids?: string[];
   openalex_id: string | null;
   semantic_scholar_id: string | null;
   url: string | null;
+  alternate_urls?: string[];
   pdf_url: string | null;
+  alternate_pdf_urls?: string[];
   citation_count: number | null;
   source_names: string[];
   semantic_score: number | null;
@@ -67,6 +70,14 @@ export interface ParsedPaper {
   parser_version: string;
   source_pdf: {
     acquisition_method: "existing_pdf" | "arxiv" | "unpaywall" | "upload";
+    acquisition_provenance?:
+      | "known_pdf_url"
+      | "alternate_pdf_url"
+      | "arxiv_id"
+      | "unpaywall"
+      | "title_verified_arxiv_fallback"
+      | "upload"
+      | null;
     url: string | null;
     sha256: string;
     size_bytes: number;
@@ -78,6 +89,13 @@ export interface PDFProcessingResponse {
   paper_id: string;
   document: ParsedPaper | null;
   message: string | null;
+  acquisition_provenance?: string | null;
+  attempts?: Array<{
+    route: string;
+    candidate_type: string;
+    safe_identifier: string;
+    outcome: string;
+  }>;
 }
 
 export interface EvidenceReference {
@@ -91,14 +109,30 @@ export interface InsightClaim {
 }
 
 export interface InsightFields {
+  paper_overview: InsightClaim[];
   research_problem: InsightClaim[];
   methods: InsightClaim[];
   key_contributions: InsightClaim[];
+  evaluation: InsightClaim[];
   main_findings: InsightClaim[];
   why_it_matters: InsightClaim[];
   target_audience: InsightClaim[];
   limitations: InsightClaim[];
   future_work: InsightClaim[];
+}
+
+export type LLMProviderId = "ollama" | "gemini" | "evl_gemma";
+
+export interface LLMProviderStatus {
+  provider_id: LLMProviderId;
+  model: string;
+  configured: boolean;
+  cloud: boolean;
+}
+
+export interface LLMProviderStatusResponse {
+  default_provider: LLMProviderId;
+  providers: LLMProviderStatus[];
 }
 
 export interface InsightsResponse {

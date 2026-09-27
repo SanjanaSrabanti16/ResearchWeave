@@ -4,10 +4,15 @@ import hashlib
 import re
 import unicodedata
 from typing import Any
+from urllib.parse import urlparse
 
 DOI_PREFIX = re.compile(r"^(?:https?://(?:dx\.)?doi\.org/|doi:\s*)", re.IGNORECASE)
-ARXIV_PREFIX = re.compile(r"^(?:https?://arxiv\.org/(?:abs|pdf)/|arxiv:\s*)", re.IGNORECASE)
+ARXIV_PREFIX = re.compile(
+    r"^(?:https?://(?:www\.)?arxiv\.org/(?:abs|pdf)/|/?(?:abs|pdf)/|arxiv:\s*)",
+    re.IGNORECASE,
+)
 ARXIV_VERSION = re.compile(r"v\d+$", re.IGNORECASE)
+ARXIV_IDENTIFIER = re.compile(r"(?:\d{4}\.\d{4,5}|[a-z-]+(?:\.[a-z-]+)?/\d{7})", re.IGNORECASE)
 
 
 def clean_text(value: Any) -> str | None:
@@ -21,7 +26,13 @@ def normalize_doi(value: Any) -> str | None:
     text = clean_text(value)
     if not text:
         return None
-    normalized = DOI_PREFIX.sub("", text).strip().casefold()
+    normalized = text
+    while True:
+        stripped = DOI_PREFIX.sub("", normalized).strip()
+        if stripped == normalized:
+            break
+        normalized = stripped
+    normalized = normalized.casefold()
     return normalized or None
 
 
@@ -29,9 +40,16 @@ def normalize_arxiv_id(value: Any) -> str | None:
     text = clean_text(value)
     if not text:
         return None
-    normalized = ARXIV_PREFIX.sub("", text).removesuffix(".pdf")
+    parsed = urlparse(text)
+    if parsed.hostname and parsed.hostname.casefold().rstrip(".") not in {
+        "arxiv.org",
+        "www.arxiv.org",
+    }:
+        return None
+    normalized = ARXIV_PREFIX.sub("", text).split("?", 1)[0].split("#", 1)[0].strip(" /")
+    normalized = re.sub(r"\.pdf$", "", normalized, flags=re.IGNORECASE)
     normalized = ARXIV_VERSION.sub("", normalized).strip().casefold()
-    return normalized or None
+    return normalized if ARXIV_IDENTIFIER.fullmatch(normalized) else None
 
 
 def normalize_title(value: Any) -> str:

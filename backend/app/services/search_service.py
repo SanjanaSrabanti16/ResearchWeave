@@ -39,12 +39,14 @@ class ProviderPacer:
         intervals: dict[str, float] | None = None,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        max_queue_seconds: float = 10.0,
     ) -> None:
         self.intervals = (
             intervals if intervals is not None else {"semantic_scholar": 1.0, "arxiv": 3.0}
         )
         self.clock = clock
         self.sleep = sleep
+        self.max_queue_seconds = max_queue_seconds
         self._locks: dict[str, asyncio.Lock] = {}
         self._last_started: dict[str, float] = {}
 
@@ -52,7 +54,14 @@ class ProviderPacer:
         interval = self.intervals.get(provider_name, 0.0)
         if interval <= 0:
             return await request()
-        async with self._locks.setdefault(provider_name, asyncio.Lock()):
+        lock = self._locks.setdefault(provider_name, asyncio.Lock())
+        try:
+            await asyncio.wait_for(lock.acquire(), timeout=self.max_queue_seconds)
+        except TimeoutError as exc:
+            raise ProviderError(
+                f"{provider_name} is busy; other provider results remain available"
+            ) from exc
+        try:
             last_started = self._last_started.get(provider_name)
             if last_started is not None:
                 delay = interval - (self.clock() - last_started)
@@ -60,6 +69,8 @@ class ProviderPacer:
                     await self.sleep(delay)
             self._last_started[provider_name] = self.clock()
             return await request()
+        finally:
+            lock.release()
 
 
 class SearchService:
@@ -144,14 +155,17 @@ class SearchService:
         variant_limit = min(40, original_limit)
 
         async def search_variants(provider: SearchProvider) -> list[ProviderResult]:
-            return [
-                await self._search_provider(
+            provider_results: list[ProviderResult] = []
+            for index, variant in enumerate(variants):
+                result = await self._search_provider(
                     provider,
                     request.model_copy(update={"query": variant}),
                     original_limit if index == 0 else variant_limit,
                 )
-                for index, variant in enumerate(variants)
-            ]
+                provider_results.append(result)
+                if result.status == "error":
+                    break
+            return provider_results
 
         by_provider = await asyncio.gather(*(search_variants(p) for p in self.providers))
         results = [result for group in by_provider for result in group]

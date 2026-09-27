@@ -1,3 +1,4 @@
+import asyncio
 from typing import Any
 
 import pytest
@@ -216,6 +217,54 @@ async def test_each_variant_uses_normal_provider_cache_key() -> None:
 
 
 @pytest.mark.asyncio
+async def test_failed_provider_stops_after_first_variant_and_other_provider_completes() -> None:
+    failing = StubProvider("slow_or_unavailable", fail=True)
+    available = RecordingProvider(
+        "available",
+        {
+            "AI agents for visualizations": [
+                PaperCandidate(
+                    title="Available result", publication_year=2025, source_names=["available"]
+                )
+            ]
+        },
+    )
+    service = SearchService(
+        [failing, available], MemoryCache(), DeduplicationService(), StubRanker()
+    )
+
+    response = await service.search(
+        SearchRequest(query="AI agents for visualizations", start_year=2025, end_year=2026)
+    )
+
+    assert response.provider_status == {"slow_or_unavailable": "error", "available": "ok"}
+    assert response.warnings == ["slow_or_unavailable unavailable"]
+    assert [paper.title for paper in response.papers] == ["Available result"]
+    assert len(available.calls) == 4
+
+
+class CountingFailureProvider(StubProvider):
+    def __init__(self, name: str) -> None:
+        super().__init__(name, fail=True)
+        self.calls = 0
+
+    async def search(self, *_: Any) -> list[PaperCandidate]:
+        self.calls += 1
+        return await super().search()
+
+
+@pytest.mark.asyncio
+async def test_unavailable_provider_is_not_retried_for_later_query_variants() -> None:
+    provider = CountingFailureProvider("arxiv")
+    service = SearchService([provider], MemoryCache(), DeduplicationService(), StubRanker())
+
+    with pytest.raises(AllProvidersFailedError):
+        await service.search(SearchRequest(query="AI agents for visualizations"))
+
+    assert provider.calls == 1
+
+
+@pytest.mark.asyncio
 async def test_provider_pacing_spaces_semantic_scholar_and_arxiv_requests() -> None:
     now = [0.0]
     delays: list[float] = []
@@ -241,3 +290,25 @@ async def test_provider_pacing_spaces_semantic_scholar_and_arxiv_requests() -> N
         ("arxiv", 4.0),
     ]
     assert delays == [1.0, 3.0]
+
+
+@pytest.mark.asyncio
+async def test_provider_pacer_bounds_cross_request_queue_wait() -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def holding_request() -> str:
+        entered.set()
+        await release.wait()
+        return "done"
+
+    pacer = ProviderPacer(intervals={"semantic_scholar": 1.0}, max_queue_seconds=0.01)
+    first = asyncio.create_task(pacer.run("semantic_scholar", holding_request))
+    await entered.wait()
+    try:
+        with pytest.raises(ProviderError, match="busy"):
+            await pacer.run("semantic_scholar", holding_request)
+    finally:
+        release.set()
+
+    assert await first == "done"

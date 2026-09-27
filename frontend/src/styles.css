@@ -60,7 +60,7 @@ button:disabled { opacity: .6; cursor: wait; }
 .document-preview h4 { margin-top: 14px; }
 .document-preview h5 { margin-top: 12px; font-size: .92rem; }
 .document-preview p { margin: 5px 0; color: #455358; line-height: 1.5; }
-.document-preview section p { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 4; }
+.document-preview > section:not(.paper-insights) > p { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 4; }
 .reference-count, .parser-provenance { margin-top: 14px !important; font-size: .78rem; }
 .parser-provenance { color: #6a7678 !important; }
 .paper-insights { margin-top: 16px; padding-top: 12px; border-top: 1px solid #dce6e0; }

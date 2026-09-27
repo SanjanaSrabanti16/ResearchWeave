@@ -107,6 +107,58 @@ async def test_remote_url_rejects_private_network_targets() -> None:
         )
 
 
+async def test_remote_url_rejects_localhost_and_http() -> None:
+    async def local_resolver(_: str) -> list[str]:
+        return ["127.0.0.1"]
+
+    with pytest.raises(PDFDownloadError, match="private or local"):
+        await validate_remote_url("https://localhost/paper.pdf", resolver=local_resolver)
+    with pytest.raises(PDFDownloadError, match="public HTTPS"):
+        await validate_remote_url("http://arxiv.org/paper.pdf", resolver=public_resolver)
+
+
+async def test_secure_download_rejects_redirect_to_private_host() -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(302, headers={"location": "https://localhost/private.pdf"})
+
+    async def resolver(host: str) -> list[str]:
+        return ["127.0.0.1"] if host == "localhost" else ["93.184.216.34"]
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        downloader = SecurePDFDownloader(
+            client, max_bytes=100, timeout_seconds=2, resolver=resolver
+        )
+        with pytest.raises(PDFDownloadError, match="approved scholarly|private or local"):
+            await downloader.download("https://arxiv.org/start")
+
+
+@pytest.mark.parametrize(
+    ("headers", "content", "message"),
+    [
+        ({"content-type": "text/html"}, b"<html>login</html>", "not served as a PDF"),
+        ({"content-type": "application/pdf"}, b"not-a-pdf", "not a valid PDF"),
+        (
+            {"content-type": "application/pdf", "content-length": "101"},
+            PDF,
+            "exceeds",
+        ),
+    ],
+)
+async def test_secure_download_rejects_non_pdf_and_oversized_content(
+    headers: dict[str, str], content: bytes, message: str
+) -> None:
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda _: httpx.Response(200, headers=headers, content=content)
+        )
+    ) as client:
+        downloader = SecurePDFDownloader(
+            client, max_bytes=100, timeout_seconds=2, resolver=public_resolver
+        )
+        with pytest.raises(PDFValidationError, match=message):
+            await downloader.download("https://arxiv.org/paper.pdf")
+
+
 async def test_grobid_tei_mapping_has_stable_evidence_chunks() -> None:
     transport = httpx.MockTransport(
         lambda _: httpx.Response(200, headers={"content-type": "application/xml"}, text=TEI)

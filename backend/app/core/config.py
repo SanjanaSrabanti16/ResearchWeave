@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlparse
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 RANKING_PROFILES = {
@@ -54,7 +54,36 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://localhost:11434"
     ollama_timeout_seconds: float = Field(default=180.0, ge=10, le=1800)
     ollama_batch_chars: int = Field(default=13000, ge=2000, le=30000)
+    llm_provider: str = "ollama"
+    gemini_api_key: SecretStr | None = None
+    gemini_model: str = "gemini-3.5-flash"
+    gemini_timeout_seconds: float = Field(default=180.0, ge=10, le=1800)
+    evl_gemma_api_key: SecretStr | None = None
+    evl_gemma_base_url: str = "https://sage200.evl.uic.edu"
+    evl_gemma_model: str = "gemma4"
+    evl_gemma_timeout_seconds: float = Field(default=180.0, ge=10, le=1800)
+    llm_diagnostic_dir: str = str(Path(__file__).parents[2] / "data" / "llm_diagnostics")
     insight_cache_dir: str = str(Path(__file__).parents[2] / "data" / "insights")
+
+    @field_validator("llm_provider")
+    @classmethod
+    def validate_llm_provider(cls, value: str) -> str:
+        normalized = value.strip().casefold()
+        if normalized not in {"ollama", "gemini", "evl_gemma"}:
+            raise ValueError("LLM_PROVIDER must be ollama, gemini, or evl_gemma")
+        return normalized
+
+    @field_validator("evl_gemma_base_url")
+    @classmethod
+    def require_https_evl_gemma(cls, value: str) -> str:
+        parsed = urlparse(value)
+        if parsed.scheme != "https" or not parsed.hostname:
+            raise ValueError("EVL_GEMMA_BASE_URL must be an HTTPS URL")
+        if parsed.username or parsed.password or parsed.query or parsed.fragment:
+            raise ValueError(
+                "EVL_GEMMA_BASE_URL must not include credentials, a query, or a fragment"
+            )
+        return value
 
     @field_validator("ollama_base_url")
     @classmethod

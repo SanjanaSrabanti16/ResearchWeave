@@ -1,9 +1,11 @@
 import type { InsightFields } from "../types/paper";
 
 const sections: Array<[keyof InsightFields, string]> = [
+  ["paper_overview", "Paper Overview"],
   ["research_problem", "Problem"],
   ["methods", "Methods"],
   ["key_contributions", "Contributions"],
+  ["evaluation", "Evaluation"],
   ["main_findings", "Findings"],
   ["why_it_matters", "Why It Matters"],
   ["target_audience", "Audience"],
@@ -22,7 +24,9 @@ export function PaperInsights({ insights }: { insights: InsightFields }) {
             <ul>
               {insights[field].map((item, index) => (
                 <li key={`${field}-${index}`}>
-                  <p>{item.claim}</p>
+                  <p className={field === "paper_overview" ? "paper-overview-text" : undefined}>
+                    {item.claim}
+                  </p>
                   <details>
                     <summary>Evidence ({item.evidence.length})</summary>
                     <ul>
@@ -38,7 +42,11 @@ export function PaperInsights({ insights }: { insights: InsightFields }) {
               ))}
             </ul>
           ) : (
-            <p>No grounded insight extracted.</p>
+            <p>
+              {field === "limitations"
+                ? "The paper does not explicitly state study limitations."
+                : "No grounded insight extracted."}
+            </p>
           )}
         </div>
       ))}

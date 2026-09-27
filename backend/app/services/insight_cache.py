@@ -12,8 +12,14 @@ class InsightCache:
         self.directory = Path(directory)
 
     @staticmethod
-    def key(document_fingerprint: str, model: str, extraction_version: str) -> str:
-        payload = f"{document_fingerprint}\0{model}\0{extraction_version}"
+    def key(
+        document_fingerprint: str,
+        model: str,
+        extraction_version: str,
+        provider_id: str | None = None,
+    ) -> str:
+        provider_part = f"{provider_id}\0" if provider_id is not None else ""
+        payload = f"{document_fingerprint}\0{provider_part}{model}\0{extraction_version}"
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     def get(self, key: str) -> InsightFields | None:

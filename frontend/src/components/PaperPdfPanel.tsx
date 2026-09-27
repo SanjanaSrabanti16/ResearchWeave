@@ -1,12 +1,38 @@
 import { useEffect, useState } from "react";
 
-import { acquireAndParsePDF, APIError, extractPaperInsights, uploadAndParsePDF } from "../api/client";
-import type { InsightsResponse, Paper, ParsedPaper } from "../types/paper";
+import {
+  acquireAndParsePDF,
+  APIError,
+  extractPaperInsights,
+  getLLMProviders,
+  uploadAndParsePDF,
+} from "../api/client";
+import type {
+  InsightsResponse,
+  LLMProviderId,
+  LLMProviderStatus,
+  Paper,
+  ParsedPaper,
+} from "../types/paper";
 import { PaperInsights } from "./PaperInsights";
 
 interface Props {
   paper: Paper;
 }
+
+const PROVIDER_LABELS: Record<LLMProviderId, string> = {
+  ollama: "Local Ollama",
+  gemini: "Google Gemini",
+  evl_gemma: "EVL Gemma",
+};
+
+const PROVIDER_DESCRIPTIONS: Record<LLMProviderId, string> = {
+  ollama: "Local/private; quality and speed depend on your local model and hardware.",
+  gemini:
+    "Cloud analysis with stronger large-context understanding; sends selected paper text to Google.",
+  evl_gemma:
+    "Remote EVL-hosted model; requires configured EVL access and sends selected paper text to the EVL inference service.",
+};
 
 export function PaperPdfPanel({ paper }: Props) {
   const [busy, setBusy] = useState(false);
@@ -19,6 +45,32 @@ export function PaperPdfPanel({ paper }: Props) {
   const [insightStage, setInsightStage] = useState("Selecting evidence");
   const [insightElapsed, setInsightElapsed] = useState(0);
   const [insightError, setInsightError] = useState<string | null>(null);
+  const [provider, setProvider] = useState<LLMProviderId>("ollama");
+  const [providers, setProviders] = useState<LLMProviderStatus[]>([
+    { provider_id: "ollama", model: "local model", configured: true, cloud: false },
+    { provider_id: "gemini", model: "Gemini", configured: false, cloud: true },
+    { provider_id: "evl_gemma", model: "Gemma", configured: false, cloud: true },
+  ]);
+
+  useEffect(() => {
+    if (!document) return;
+    let active = true;
+    getLLMProviders()
+      .then((result) => {
+        if (!active) return;
+        setProviders(result.providers);
+        const preferred = result.providers.find(
+          (item) => item.provider_id === result.default_provider && item.configured,
+        );
+        if (preferred) setProvider(preferred.provider_id);
+      })
+      .catch(() => {
+        // Ollama remains the safe backward-compatible selection if status is unavailable.
+      });
+    return () => {
+      active = false;
+    };
+  }, [document]);
 
   useEffect(() => {
     if (!insightBusy) return;
@@ -72,7 +124,7 @@ export function PaperPdfPanel({ paper }: Props) {
     setInsightElapsed(0);
     setInsightError(null);
     try {
-      setInsights(await extractPaperInsights(document, setInsightStage));
+      setInsights(await extractPaperInsights(document, setInsightStage, provider));
     } catch (error) {
       setInsightError(error instanceof Error ? error.message : "Insight extraction failed");
     } finally {
@@ -124,14 +176,41 @@ export function PaperPdfPanel({ paper }: Props) {
             Parsed by {document.parser} {document.parser_version} from a validated{" "}
             {document.source_pdf.acquisition_method.replace("_", " ")} PDF.
           </p>
-          <button
-            type="button"
-            className="secondary-button"
-            onClick={extractInsights}
-            disabled={insightBusy}
-          >
-            {insightBusy ? "Extracting insights..." : "Extract grounded insights"}
-          </button>
+          <div className="insight-provider-control">
+            <label htmlFor={`insight-provider-${paper.id}`}>Analysis provider</label>
+            <select
+              id={`insight-provider-${paper.id}`}
+              value={provider}
+              onChange={(event) => {
+                setProvider(event.target.value as LLMProviderId);
+                setInsights(null);
+                setInsightError(null);
+              }}
+              disabled={insightBusy}
+            >
+              {providers.map((item) => (
+                <option
+                  key={item.provider_id}
+                  value={item.provider_id}
+                  disabled={!item.configured}
+                >
+                  {PROVIDER_LABELS[item.provider_id]}
+                  {!item.configured ? " (unavailable)" : ""}
+                </option>
+              ))}
+            </select>
+            <p className="parser-provenance">
+              {PROVIDER_DESCRIPTIONS[provider]}
+            </p>
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={extractInsights}
+              disabled={insightBusy}
+            >
+              {insightBusy ? "Extracting insights..." : "Extract grounded insights"}
+            </button>
+          </div>
           {insightBusy && (
             <p className="pdf-message" role="status">
               {insightStage} ({insightElapsed}s elapsed)
@@ -141,7 +220,8 @@ export function PaperPdfPanel({ paper }: Props) {
           {insights && (
             <>
               <p className="parser-provenance">
-                Grounded with {insights.model}{insights.cached ? " (cached)" : ""}.
+                Grounded with {PROVIDER_LABELS[provider]} ({insights.model})
+                {insights.cached ? " (cached)" : ""}.
               </p>
               <PaperInsights insights={insights.insights} />
             </>

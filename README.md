@@ -2,7 +2,7 @@
 
 Research Landscape Explorer is an open-source, local-first foundation for finding the scholarly literature most relevant to a research question. It searches multiple free scholarly indexes, converts their records to one schema, removes duplicates, and applies a two-stage open-source relevance ranker.
 
-This repository implements Milestone 1 retrieval/ranking, Milestone 2A PDF acquisition/parsing, and **Milestone 2B local evidence-grounded paper insights**. It does not synthesize across papers, cluster topics, or draw research graphs.
+This repository implements Milestone 1 retrieval/ranking, Milestone 2A PDF acquisition/parsing, and **Milestone 2B provider-independent, evidence-grounded paper insights**. It does not synthesize across papers, cluster topics, or draw research graphs.
 
 ## Milestone 1 features
 
@@ -30,11 +30,12 @@ This repository implements Milestone 1 retrieval/ranking, Milestone 2A PDF acqui
 
 ## Milestone 2B features
 
-- Optional local Ollama extraction from a parsed paper, defaulting to `qwen3:1.7b`
-- Eight structured insight fields, each containing concise claims and chunk-ID/quote evidence
+- A shared paper-understanding pipeline with local Ollama, Google Gemini, and EVL Gemma adapters
+- Evidence-first extraction, deterministic validation, and synthesis from a validated evidence ledger
+- Ten structured insight fields, including paper overview and evaluation, with chunk-ID/quote evidence
 - Programmatic chunk-ID and normalized exact-quote validation; unsupported claims are removed
-- Deterministic selection of high-value chunks and exact evidence excerpts, plus a fingerprint/model/version extraction cache
-- Expandable evidence in the existing PDF panel; no cloud LLM is used
+- Provider-capability-aware context planning plus provider/model/version-separated caching
+- Minimal provider selection and expandable evidence in the existing PDF panel
 
 ## Architecture
 
@@ -60,9 +61,13 @@ The backend separates HTTP routes (`app/api`), API/domain models (`app/models`),
 - React 18, TypeScript, Vite
 - pytest, Ruff, Vitest, ESLint
 
-No paid API, API credit, hosted vector database, hosted parser, or LLM service is used.
+Search, ranking, PDF parsing, and local Ollama extraction require no paid service. Gemini and EVL Gemma are optional remote providers configured with server-side access keys.
 
-Milestone 2B requires a separately installed local Ollama server and a locally pulled model. Run `ollama pull qwen3:1.7b`, then start Ollama if it is not already running. Without Ollama, search and PDF parsing still work; only insight extraction returns an unavailable error. The backend defaults to `http://localhost:11434`. In Docker Desktop Compose, the backend connects to the host through `http://host.docker.internal:11434` by default; set `OLLAMA_DOCKER_BASE_URL` to another local address if needed.
+Milestone 2B defaults to a separately installed local Ollama server and `qwen3:1.7b`. Run `ollama pull qwen3:1.7b`, then start Ollama if needed. The backend defaults to `http://localhost:11434`; Docker Desktop Compose reaches the host at `http://host.docker.internal:11434`. Local Ollama keeps selected paper text on the local machine.
+
+To enable Gemini, create an API key in Google AI Studio and set `GEMINI_API_KEY` only in the private backend `.env`; never put it in `VITE_*` variables or browser storage. `GEMINI_MODEL` defaults to `gemini-3.5-flash`. Gemini sends the selected paper context and validated evidence ledger to Google's API for cloud analysis. The provider selector marks Gemini unavailable when no server-side key is configured.
+
+To enable the EVL-hosted Gemma service, set `EVL_GEMMA_API_KEY` only in the private backend `.env`. `EVL_GEMMA_BASE_URL` defaults to `https://sage200.evl.uic.edu`, and `EVL_GEMMA_MODEL` defaults to `gemma4`. Selected paper context is sent to the EVL inference service. The provider selector marks EVL Gemma unavailable when no server-side key is configured.
 
 ## Local setup
 
@@ -144,11 +149,19 @@ docker run --rm --init --ulimit core=0 -p 8070:8070 grobid/grobid:0.9.1-crf
 | `GROBID_TIMEOUT_SECONDS` | `120` | Full-document parser timeout |
 | `GROBID_PARSER_VERSION` | `0.9.1-crf+frontmatter-v1` | Parser/cache provenance version |
 | `PARSED_DOCUMENT_CACHE_DIR` | `backend/data/parsed_documents` | Structured parsed-document cache |
+| `LLM_PROVIDER` | `ollama` | Default insight provider: `ollama`, `gemini`, or `evl_gemma` |
 | `OLLAMA_MODEL` | `qwen3:1.7b` | Local model used for structured paper insights |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Local-only Ollama address for a host-run backend |
 | `OLLAMA_DOCKER_BASE_URL` | `http://host.docker.internal:11434` | Local Ollama address passed into the Compose backend |
 | `OLLAMA_TIMEOUT_SECONDS` | `180` | Per-call Ollama timeout; CPU-only extraction can still be slow |
 | `OLLAMA_BATCH_CHARS` | `13000` | Maximum selected evidence-chunk text per extraction |
+| `GEMINI_API_KEY` | empty | Server-side Google AI Studio key; never returned to the browser |
+| `GEMINI_MODEL` | `gemini-3.5-flash` | Gemini model used for paper insights |
+| `GEMINI_TIMEOUT_SECONDS` | `180` | Per-call Gemini timeout |
+| `EVL_GEMMA_API_KEY` | empty | Server-side EVL access key; never returned to the browser |
+| `EVL_GEMMA_BASE_URL` | `https://sage200.evl.uic.edu` | OpenAI-compatible EVL service base URL |
+| `EVL_GEMMA_MODEL` | `gemma4` | EVL-hosted model used for paper insights |
+| `EVL_GEMMA_TIMEOUT_SECONDS` | `180` | Per-call EVL Gemma timeout |
 | `INSIGHT_CACHE_DIR` | `backend/data/insights` | Validated insight cache |
 
 Ranking profiles resolve centrally in backend settings:
@@ -192,9 +205,11 @@ Acquisition reports `existing_pdf`, `arxiv`, `unpaywall`, or `upload_required` o
 
 ## Evidence-grounded insights
 
-After a PDF is parsed, the paper panel shows its metadata and abstract immediately, then sends its `ParsedPaper` to `POST /api/papers/insights/stream` as `{"document": <ParsedPaper>}`. The newline-delimited JSON response reports selection, generation, and evidence-validation stages before returning insights. The original `POST /api/papers/insights` JSON endpoint remains available. The result includes `paper_id`, `document_fingerprint`, `model`, `extraction_version`, `cached`, and `insights`. The eight insight arrays are `research_problem`, `methods`, `key_contributions`, `main_findings`, `why_it_matters`, `target_audience`, `limitations`, and `future_work`. Each item has a `claim` and one or more `{chunk_id, quote}` evidence entries.
+After a PDF is parsed, the paper panel sends its `ParsedPaper` and optional provider to `POST /api/papers/insights/stream`. Omitting `provider` remains backward-compatible and uses `LLM_PROVIDER`, which defaults to Ollama. `GET /api/llm/providers` returns only safe provider IDs, models, configuration state, and local/cloud flags; it never returns keys. The JSON endpoint remains available. The ten insight arrays are `paper_overview`, `research_problem`, `methods`, `key_contributions`, `evaluation`, `main_findings`, `why_it_matters`, `target_audience`, `limitations`, and `future_work`.
 
-The backend first selects roughly 15–25 evidence candidates from the abstract and high-value sections using headings and local lexical signals. It deterministically assigns compact IDs to exact excerpts and makes at most two focused Ollama calls. The model returns concise claims plus excerpt IDs, so it does not spend tokens copying long quotes or fragile chunk IDs. The backend maps those IDs back to canonical chunk IDs and verbatim quotes, then applies the existing Unicode/case/punctuation-normalized quote validation. Claims left without valid evidence are omitted, and no page numbers are generated. The selected claims are conservatively deduplicated and globally limited to 4 problems, 8 methods, 8 contributions, 10 findings, 5 impact claims, 5 audiences, 8 limitations, and 8 future-work items. The cache key includes document/PDF content, model name, and extraction version, so extraction changes do not reuse older results. Ollama unavailability returns HTTP 503, timeouts HTTP 504, and malformed structured output HTTP 502 on the JSON endpoint. Quote matching verifies provenance, not semantic entailment, so researchers should still inspect the quoted evidence before relying on a claim.
+The shared context builder gives large-context providers one bounded rich paper packet and small local providers at most two deterministic, section-aware packets. Providers return categorized evidence claims using compact excerpt IDs. The backend maps those IDs to canonical chunks and quotes, runs the frozen v16 attribution, finding, qualifier, limitation, future-work, and semantic safeguards, and creates a ledger containing only validated evidence. A final provider call receives that ledger—not rejected model output—and may cite only ledger claim IDs. ResearchWeave maps those IDs back to existing evidence references and validates final claims again. Cache identity includes document content, pipeline version, provider ID, and model ID.
+
+Provider-specific SDK behavior lives behind `LLMProvider`. Adding another provider normally requires one adapter, server-side configuration/registration, and provider-focused tests; context construction, evidence models, validation, caching, API responses, and rendering remain shared.
 
 References: [GROBID REST API](https://grobid.readthedocs.io/en/latest/Grobid-service/), [GROBID Docker setup](https://github.com/grobidOrg/grobid/blob/master/doc/getting_started.md), [Unpaywall REST API](https://unpaywall.org/api), and [Unpaywall data format](https://unpaywall.org/data-format).
 

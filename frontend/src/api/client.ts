@@ -1,6 +1,8 @@
 import type {
   Paper,
   InsightsResponse,
+  LLMProviderId,
+  LLMProviderStatusResponse,
   ParsedPaper,
   PDFProcessingResponse,
   SearchPayload,
@@ -52,7 +54,14 @@ export async function acquireAndParsePDF(paper: Paper): Promise<PDFProcessingRes
       paper_id: paper.id,
       doi: paper.doi,
       arxiv_id: paper.arxiv_id,
+      arxiv_ids: paper.arxiv_ids ?? [],
       pdf_url: paper.pdf_url,
+      alternate_pdf_urls: paper.alternate_pdf_urls ?? [],
+      url: paper.url,
+      alternate_urls: paper.alternate_urls ?? [],
+      title: paper.title,
+      authors: paper.authors,
+      publication_year: paper.publication_year,
     }),
   });
   if (!response.ok) {
@@ -86,11 +95,12 @@ type InsightEvent =
 export async function extractPaperInsights(
   document: ParsedPaper,
   onProgress?: (stage: string) => void,
+  provider?: LLMProviderId,
 ): Promise<InsightsResponse> {
   const response = await fetch(`${API_URL}/api/papers/insights/stream`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ document }),
+    body: JSON.stringify({ document, ...(provider ? { provider } : {}) }),
   });
   if (!response.ok) {
     throw new APIError(await responseError(response, "Insight extraction failed"), response.status);
@@ -114,4 +124,12 @@ export async function extractPaperInsights(
     if (done) break;
   }
   throw new Error("Insight progress stream ended before a result was returned");
+}
+
+export async function getLLMProviders(): Promise<LLMProviderStatusResponse> {
+  const response = await fetch(`${API_URL}/api/llm/providers`);
+  if (!response.ok) {
+    throw new APIError(await responseError(response, "Provider status failed"), response.status);
+  }
+  return (await response.json()) as LLMProviderStatusResponse;
 }
