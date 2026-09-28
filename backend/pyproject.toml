@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "research-landscape-backend"
+name = "researchweave-backend"
 version = "0.1.0"
-description = "Retrieval and ranking backend for Research Landscape Explorer"
+description = "Search, graph, PDF, and evidence-grounded insight backend for ResearchWeave"
 requires-python = ">=3.11"
 dependencies = [
   "arxiv==4.0.1",

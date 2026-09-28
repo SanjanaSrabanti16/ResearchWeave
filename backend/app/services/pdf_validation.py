@@ -37,6 +37,11 @@ class PDFDownloadError(PDFValidationError):
 
 
 Resolver = Callable[[str], Awaitable[list[str]]]
+Sleeper = Callable[[float], Awaitable[None]]
+
+
+class _TransientArxivResponse(PDFDownloadError):
+    pass
 
 
 async def resolve_host(host: str) -> list[str]:
@@ -91,6 +96,9 @@ class SecurePDFDownloader:
         allowed_hosts: tuple[str, ...] = DEFAULT_ALLOWED_PDF_HOSTS,
         resolver: Resolver = resolve_host,
         max_redirects: int = 5,
+        arxiv_retry_delay_seconds: float = 3.0,
+        arxiv_max_attempts: int = 3,
+        sleeper: Sleeper = asyncio.sleep,
     ) -> None:
         self.client = client
         self.max_bytes = max_bytes
@@ -98,8 +106,25 @@ class SecurePDFDownloader:
         self.allowed_hosts = allowed_hosts
         self.resolver = resolver
         self.max_redirects = max_redirects
+        self.arxiv_retry_delay_seconds = max(3.0, arxiv_retry_delay_seconds)
+        self.arxiv_max_attempts = max(1, arxiv_max_attempts)
+        self.sleeper = sleeper
 
     async def download(self, url: str, *, trusted_discovery: bool = False) -> tuple[bytes, str]:
+        for attempt in range(self.arxiv_max_attempts):
+            try:
+                return await self._download_with_redirects(url, trusted_discovery=trusted_discovery)
+            except _TransientArxivResponse as exc:
+                if attempt + 1 >= self.arxiv_max_attempts:
+                    raise PDFDownloadError(
+                        "The arXiv PDF server repeatedly rejected the request (406)"
+                    ) from exc
+                await self.sleeper(self.arxiv_retry_delay_seconds)
+        raise PDFDownloadError("The PDF could not be downloaded")
+
+    async def _download_with_redirects(
+        self, url: str, *, trusted_discovery: bool
+    ) -> tuple[bytes, str]:
         current_url = url
         for redirect_count in range(self.max_redirects + 1):
             await validate_remote_url(
@@ -119,6 +144,13 @@ class SecurePDFDownloader:
                             raise PDFDownloadError("The PDF URL returned an invalid redirect")
                         current_url = str(response.url.join(location))
                         continue
+                    if response.status_code == 406:
+                        body = await response.aread()
+                        hostname = (response.url.host or "").casefold().rstrip(".")
+                        if hostname in {"arxiv.org", "www.arxiv.org"} and not body:
+                            raise _TransientArxivResponse(
+                                "The arXiv PDF server returned an empty response (406)"
+                            )
                     if response.status_code >= 400:
                         raise PDFDownloadError(
                             f"The PDF server rejected the request ({response.status_code})"

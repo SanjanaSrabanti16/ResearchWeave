@@ -2,7 +2,7 @@ from fastapi.testclient import TestClient
 
 from app.core.config import Settings
 from app.main import create_app
-from app.models.api import SearchRequest, SearchResponse
+from app.models.api import ProviderHealth, SearchRequest, SearchResponse
 from app.models.paper import Paper
 from app.services.search_service import AllProvidersFailedError
 
@@ -29,7 +29,18 @@ class SuccessfulSearchService:
                     reranker_score=2.5,
                 )
             ],
-            provider_status={"openalex": "ok", "semantic_scholar": "ok", "arxiv": "cached"},
+            provider_status={
+                "openalex": ProviderHealth(status="ok", successful_requests=4, failed_requests=0),
+                "semantic_scholar": ProviderHealth(
+                    status="degraded",
+                    successful_requests=3,
+                    failed_requests=1,
+                    message="Some query variants failed; partial results remain available.",
+                ),
+                "arxiv": ProviderHealth(
+                    status="ok", successful_requests=4, failed_requests=0, cached_requests=4
+                ),
+            },
         )
 
 
@@ -94,9 +105,27 @@ def test_successful_search_returns_expected_response_shape(tmp_path) -> None:
             }
         ],
         "provider_status": {
-            "openalex": "ok",
-            "semantic_scholar": "ok",
-            "arxiv": "cached",
+            "openalex": {
+                "status": "ok",
+                "successful_requests": 4,
+                "failed_requests": 0,
+                "cached_requests": 0,
+                "message": None,
+            },
+            "semantic_scholar": {
+                "status": "degraded",
+                "successful_requests": 3,
+                "failed_requests": 1,
+                "cached_requests": 0,
+                "message": "Some query variants failed; partial results remain available.",
+            },
+            "arxiv": {
+                "status": "ok",
+                "successful_requests": 4,
+                "failed_requests": 0,
+                "cached_requests": 4,
+                "message": None,
+            },
         },
         "warnings": [],
     }

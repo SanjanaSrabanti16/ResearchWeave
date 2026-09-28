@@ -8,6 +8,7 @@ from app.services.normalization import (
     clean_text,
     normalize_arxiv_id,
     normalize_doi,
+    normalize_metadata_text,
     stable_paper_id,
 )
 
@@ -27,7 +28,7 @@ class SemanticScholarProvider(SearchProvider):
 
     @classmethod
     def normalize(cls, item: dict[str, Any]) -> PaperCandidate | None:
-        title = clean_text(item.get("title"))
+        title = normalize_metadata_text(item.get("title"))
         if not title:
             return None
         external = item.get("externalIds") if isinstance(item.get("externalIds"), dict) else {}
@@ -47,7 +48,7 @@ class SemanticScholarProvider(SearchProvider):
         return PaperCandidate(
             id=stable_paper_id(doi=doi, arxiv_id=arxiv_id, title=title),
             title=title,
-            abstract=clean_text(item.get("abstract")),
+            abstract=normalize_metadata_text(item.get("abstract")),
             authors=authors,
             publication_year=year,
             publication_date=clean_text(item.get("publicationDate")),

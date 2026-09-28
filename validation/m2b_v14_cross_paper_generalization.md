@@ -2,7 +2,7 @@
 
 ## Environment
 
-- Project root: `C:\Drive(D)\Sanjana\Agentic AI\ResearchWeave`
+- Project root: `<repository-root>`
 - Extraction version: `m2b-v14-conditional-future`
 - Production model: `qwen3:1.7b`
 - Services: local Ollama and GROBID were reachable during preflight.

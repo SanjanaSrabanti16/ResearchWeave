@@ -183,7 +183,7 @@ async def test_failed_direct_pdf_falls_through_to_preserved_arxiv_id() -> None:
     assert result.acquisition_provenance == "arxiv_id"
 
 
-async def test_failed_direct_uses_alternate_pdf_before_arxiv() -> None:
+async def test_failed_direct_prefers_known_arxiv_before_other_provider_alternate() -> None:
     direct = "https://arxiv.org/missing.pdf"
     alternate = "https://openreview.net/working.pdf"
     downloader = SequenceDownloader({direct: PDFDownloadError("rejected (404)")})
@@ -195,6 +195,27 @@ async def test_failed_direct_uses_alternate_pdf_before_arxiv() -> None:
             pdf_url=direct,
             alternate_pdf_urls=[alternate],
             arxiv_id="2401.12345",
+        )
+    )
+
+    assert [call[0] for call in downloader.calls] == [
+        direct,
+        "https://arxiv.org/pdf/2401.12345.pdf",
+    ]
+    assert result.acquisition_provenance == "arxiv_id"
+
+
+async def test_first_direct_pdf_failure_uses_second_provider_candidate() -> None:
+    direct = "https://repository.example/missing.pdf"
+    alternate = "https://openreview.net/working.pdf"
+    downloader = SequenceDownloader({direct: PDFDownloadError("rejected (404)")})
+    service = PDFAcquisitionService(downloader, StaticUnpaywall(), RecordingProcessor())
+
+    result = await service.acquire(
+        PDFAcquisitionRequest(
+            paper_id="paper-1",
+            pdf_url=direct,
+            alternate_pdf_urls=[alternate],
         )
     )
 
@@ -265,6 +286,89 @@ async def test_publisher_record_can_acquire_with_preserved_arxiv_identity() -> N
     assert result.status == "arxiv"
     assert result.document is not None
     assert result.document.source_pdf.url == "https://arxiv.org/pdf/2401.54321.pdf"
+
+
+async def test_arxiv_doi_is_an_acquisition_identity_for_publisher_record() -> None:
+    service = PDFAcquisitionService(SequenceDownloader(), StaticUnpaywall(), RecordingProcessor())
+
+    result = await service.acquire(
+        PDFAcquisitionRequest(
+            paper_id="canonical-paper",
+            doi="https://doi.org/10.48550/arXiv.2508.07496v2",
+            url="https://publisher.example/article",
+        )
+    )
+
+    assert result.status == "arxiv"
+    assert result.document is not None
+    assert result.document.paper_id == "canonical-paper"
+    assert result.document.source_pdf.url == "https://arxiv.org/pdf/2508.07496.pdf"
+
+
+async def test_bad_semantic_scholar_landing_page_falls_through_to_known_arxiv() -> None:
+    landing = "https://pmc.ncbi.nlm.nih.gov/articles/PMC13340627/"
+    arxiv_pdf = "https://arxiv.org/pdf/2508.07496.pdf"
+    downloader = SequenceDownloader({landing: PDFValidationError("not served as a PDF")})
+    service = PDFAcquisitionService(downloader, StaticUnpaywall(), RecordingProcessor())
+
+    result = await service.acquire(
+        PDFAcquisitionRequest(
+            paper_id="streetweave",
+            pdf_url=landing,
+            arxiv_ids=["2508.07496"],
+            alternate_pdf_urls=[arxiv_pdf],
+        )
+    )
+
+    assert [call[0] for call in downloader.calls] == [landing, arxiv_pdf]
+    assert [attempt.outcome for attempt in result.attempts] == ["invalid_pdf", "success"]
+    assert result.status == "arxiv"
+
+
+async def test_distinct_arxiv_url_forms_remain_fallbacks_while_exact_urls_deduplicate() -> None:
+    extensionless = "https://arxiv.org/pdf/2508.07496"
+    derived = "https://arxiv.org/pdf/2508.07496.pdf"
+    downloader = SequenceDownloader(
+        {
+            extensionless: PDFDownloadError("network failure"),
+            derived: PDFDownloadError("network failure"),
+        }
+    )
+    service = PDFAcquisitionService(downloader, StaticUnpaywall(), RecordingProcessor())
+
+    result = await service.acquire(
+        PDFAcquisitionRequest(
+            paper_id="paper-1",
+            pdf_url=extensionless,
+            arxiv_id="2508.07496v3",
+            alternate_pdf_urls=[extensionless, derived, derived],
+        )
+    )
+
+    assert [call[0] for call in downloader.calls] == [extensionless, derived]
+    assert result.status == "upload_required"
+
+
+async def test_known_arxiv_candidate_does_not_depend_on_failing_metadata_provider() -> None:
+    class FailingProvider:
+        async def search(self, *_: object, **__: object) -> list[PaperCandidate]:
+            raise RuntimeError("429 from metadata provider")
+
+    provider = FailingProvider()
+    service = PDFAcquisitionService(
+        SequenceDownloader(), StaticUnpaywall(), RecordingProcessor(), provider
+    )
+
+    result = await service.acquire(
+        PDFAcquisitionRequest(
+            paper_id="paper-1",
+            title="Known paper",
+            arxiv_id="2508.07496",
+        )
+    )
+
+    assert result.status == "arxiv"
+    assert all(attempt.route != "title_verified_arxiv_fallback" for attempt in result.attempts)
 
 
 def fallback_paper(

@@ -16,6 +16,8 @@ from app.providers import ArxivProvider, OpenAlexProvider, SemanticScholarProvid
 from app.providers.unpaywall import UnpaywallProvider
 from app.services.cache_service import CacheService
 from app.services.deduplication_service import DeduplicationService
+from app.services.graph_semantics import GraphSemanticsService
+from app.services.graph_service import GraphService, GraphStateResolver
 from app.services.insight_cache import InsightCache
 from app.services.paper_understanding_service import PaperUnderstandingService
 from app.services.parsed_document_cache import ParsedDocumentCache
@@ -118,10 +120,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     default_provider=settings.llm_provider,
                 )
                 app.state.llm_registry = registry
+                insight_cache = InsightCache(settings.insight_cache_dir)
                 app.state.insight_service = PaperUnderstandingService(
                     registry=registry,
-                    cache=InsightCache(settings.insight_cache_dir),
+                    cache=insight_cache,
                     batch_chars=settings.ollama_batch_chars,
+                )
+                app.state.graph_service = GraphService(
+                    semantics=GraphSemanticsService(settings.embedding_model),
+                    state_resolver=GraphStateResolver(
+                        settings.parsed_document_cache_dir,
+                        insight_cache,
+                        registry,
+                    ),
                 )
                 try:
                     yield

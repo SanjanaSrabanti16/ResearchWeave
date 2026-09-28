@@ -1,7 +1,10 @@
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.models.document import ParsedPaper
+from app.models.insights import InsightsResponse
 from app.models.paper import Paper
 
 
@@ -20,14 +23,36 @@ class SearchRequest(BaseModel):
         return self
 
 
+class ProviderHealth(BaseModel):
+    status: Literal["ok", "degraded", "unavailable"]
+    successful_requests: int = Field(ge=0)
+    failed_requests: int = Field(ge=0)
+    cached_requests: int = Field(default=0, ge=0)
+    message: str | None = None
+
+
 class SearchResponse(BaseModel):
     query: str
     candidate_count: int
     deduplicated_count: int
     ranked_count: int
     papers: list[Paper]
-    provider_status: dict[str, str]
+    provider_status: dict[str, ProviderHealth]
     warnings: list[str] = Field(default_factory=list)
+
+
+class GraphRequest(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    query: str = Field(min_length=2, max_length=500)
+    papers: list[Paper] = Field(min_length=1, max_length=50)
+
+
+class CachedPaperAnalysisResponse(BaseModel):
+    paper_id: str
+    document: ParsedPaper | None = None
+    insights: InsightsResponse | None = None
+    insight_provider: str | None = None
 
 
 class HealthResponse(BaseModel):

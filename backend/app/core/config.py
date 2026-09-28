@@ -25,7 +25,7 @@ RANKING_PROFILES = {
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_ignore_empty=True, extra="ignore")
 
-    app_name: str = "Research Landscape Explorer"
+    app_name: str = "ResearchWeave"
     semantic_scholar_api_key: str | None = None
     openalex_api_key: str | None = None
     ranking_profile: Literal["fast", "quality"] = "fast"

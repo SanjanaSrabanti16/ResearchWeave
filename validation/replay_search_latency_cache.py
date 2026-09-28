@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -32,7 +33,7 @@ from app.providers.base import ProviderError
 from app.services.search_service import SearchService
 
 CACHE_PATH = Path(
-    r"C:\Users\sanja\AppData\Local\Temp\researchweave-search-diagnostic-r_370rk4\cache.sqlite3"
+    os.environ.get("RESEARCHWEAVE_REPLAY_CACHE", PROJECT_ROOT / "review_live_cache.sqlite3")
 )
 
 

@@ -4,7 +4,12 @@ from typing import Any
 
 from app.models.paper import PaperCandidate
 from app.providers.base import ProviderError, SearchProvider
-from app.services.normalization import clean_text, normalize_doi, stable_paper_id
+from app.services.normalization import (
+    clean_text,
+    normalize_doi,
+    normalize_metadata_text,
+    stable_paper_id,
+)
 
 
 class OpenAlexProvider(SearchProvider):
@@ -31,7 +36,7 @@ class OpenAlexProvider(SearchProvider):
 
     @classmethod
     def normalize(cls, item: dict[str, Any]) -> PaperCandidate | None:
-        title = clean_text(item.get("display_name") or item.get("title"))
+        title = normalize_metadata_text(item.get("display_name") or item.get("title"))
         if not title:
             return None
         ids = item.get("ids") if isinstance(item.get("ids"), dict) else {}
@@ -78,7 +83,7 @@ class OpenAlexProvider(SearchProvider):
         return PaperCandidate(
             id=stable_paper_id(doi=doi, arxiv_id=None, title=title),
             title=title,
-            abstract=cls._abstract(item.get("abstract_inverted_index")),
+            abstract=normalize_metadata_text(cls._abstract(item.get("abstract_inverted_index"))),
             authors=authors,
             publication_year=year,
             publication_date=clean_text(item.get("publication_date")),

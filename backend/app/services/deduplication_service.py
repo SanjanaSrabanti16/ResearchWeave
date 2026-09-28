@@ -8,6 +8,7 @@ from app.models.paper import Paper, PaperCandidate
 from app.services.normalization import (
     normalize_arxiv_id,
     normalize_doi,
+    normalize_metadata_text,
     normalize_title,
     stable_paper_id,
 )
@@ -49,6 +50,21 @@ def _unique_urls(values: Iterable[str]) -> list[str]:
     return result
 
 
+def _arxiv_identities(paper: PaperCandidate) -> list[str]:
+    candidates = (
+        [paper.arxiv_id]
+        + paper.arxiv_ids
+        + [paper.doi]
+        + ([paper.url] if paper.url else [])
+        + paper.alternate_urls
+        + ([paper.pdf_url] if paper.pdf_url else [])
+        + paper.alternate_pdf_urls
+    )
+    return _unique(
+        identity for candidate in candidates if (identity := normalize_arxiv_id(candidate))
+    )
+
+
 class DeduplicationService:
     def deduplicate(self, papers: list[PaperCandidate]) -> list[Paper]:
         if not papers:
@@ -77,7 +93,7 @@ class DeduplicationService:
 
         arxiv_indexes: dict[str, int] = {}
         for index, paper in enumerate(papers):
-            if arxiv_id := normalize_arxiv_id(paper.arxiv_id):
+            for arxiv_id in _arxiv_identities(paper):
                 if arxiv_id in arxiv_indexes:
                     union(index, arxiv_indexes[arxiv_id])
                 else:
@@ -85,7 +101,7 @@ class DeduplicationService:
 
         title_indexes: dict[str, list[int]] = defaultdict(list)
         for index, paper in enumerate(papers):
-            if title := normalize_title(paper.title):
+            if title := normalize_title(normalize_metadata_text(paper.title)):
                 title_indexes[title].append(index)
 
         for matching_indexes in title_indexes.values():
@@ -101,13 +117,13 @@ class DeduplicationService:
                 doi
                 for root in roots
                 for paper in members_by_root[root]
-                if (doi := normalize_doi(paper.doi))
+                if (doi := normalize_doi(paper.doi)) and normalize_arxiv_id(doi) is None
             }
             arxiv_ids = {
                 arxiv_id
                 for root in roots
                 for paper in members_by_root[root]
-                if (arxiv_id := normalize_arxiv_id(paper.arxiv_id))
+                for arxiv_id in _arxiv_identities(paper)
             }
             # An identifier-free record must never bridge distinct strong-ID groups.
             if len(dois) > 1 or len(arxiv_ids) > 1:
@@ -156,10 +172,19 @@ class DeduplicationService:
                     return value
             return None
 
-        abstracts = [paper.abstract for paper in group if paper.abstract]
+        abstracts = [
+            abstract for paper in group if (abstract := normalize_metadata_text(paper.abstract))
+        ]
         abstract = max(abstracts, key=len) if abstracts else None
-        doi = normalize_doi(base.doi) or next(
-            (value for paper in group if (value := normalize_doi(paper.doi))), None
+        title = normalize_metadata_text(base.title) or base.title
+        normalized_dois = _unique(
+            value for paper in [base, *group] if (value := normalize_doi(paper.doi))
+        )
+        publisher_dois = [doi for doi in normalized_dois if normalize_arxiv_id(doi) is None]
+        doi = (
+            publisher_dois[0]
+            if publisher_dois
+            else (normalized_dois[0] if normalized_dois else None)
         )
         landing_urls = _unique_urls(
             value
@@ -171,26 +196,14 @@ class DeduplicationService:
             for paper in [base, *group]
             for value in ([paper.pdf_url] if paper.pdf_url else []) + paper.alternate_pdf_urls
         )
-        arxiv_ids = _unique(
-            value
-            for paper in [base, *group]
-            for candidate in (
-                [paper.arxiv_id]
-                + paper.arxiv_ids
-                + ([paper.url] if paper.url else [])
-                + paper.alternate_urls
-                + ([paper.pdf_url] if paper.pdf_url else [])
-                + paper.alternate_pdf_urls
-            )
-            if (value := normalize_arxiv_id(candidate))
-        )
+        arxiv_ids = _unique(value for paper in [base, *group] for value in _arxiv_identities(paper))
         arxiv_id = arxiv_ids[0] if arxiv_ids else None
         citations = [paper.citation_count for paper in group if paper.citation_count is not None]
         authors = max((paper.authors for paper in group), key=len, default=[])
         sources = _unique(source for paper in group for source in paper.source_names)
         return Paper(
-            id=stable_paper_id(doi=doi, arxiv_id=arxiv_id, title=base.title),
-            title=base.title,
+            id=stable_paper_id(doi=doi, arxiv_id=arxiv_id, title=title),
+            title=title,
             abstract=abstract,
             authors=authors,
             publication_year=first("publication_year"),

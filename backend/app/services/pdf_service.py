@@ -69,9 +69,12 @@ class PDFProcessingService:
         )
         cached = self.cache.get(cache_key)
         if cached is not None:
-            return cached.model_copy(update={"paper_id": paper_id, "source_pdf": source})
+            document = cached.model_copy(update={"paper_id": paper_id, "source_pdf": source})
+            self.cache.put_paper_state(document)
+            return document
         document = await self.parser.parse(paper_id, pdf_bytes, source)
         self.cache.put(cache_key, document)
+        self.cache.put_paper_state(document)
         return document
 
 
@@ -230,16 +233,24 @@ class PDFAcquisitionService:
                     "known_pdf_url",
                 )
             )
+        arxiv_pdf_urls = [
+            url
+            for url in request.alternate_pdf_urls
+            if normalize_arxiv_id(url)
+            and (urlsplit(url).hostname or "").casefold().rstrip(".")
+            in {"arxiv.org", "www.arxiv.org"}
+            and urlsplit(url).path.casefold().startswith("/pdf/")
+        ]
         candidates.extend(
             _PDFCandidate(
                 "alternate_pdf_url",
-                "provider_pdf_url",
+                "provider_arxiv_pdf_url",
                 url,
-                "existing_pdf",
-                "existing_pdf",
+                "arxiv",
+                "arxiv",
                 "alternate_pdf_url",
             )
-            for url in request.alternate_pdf_urls
+            for url in arxiv_pdf_urls
         )
 
         explicit_arxiv_ids = [request.arxiv_id, *request.arxiv_ids]
@@ -259,7 +270,14 @@ class PDFAcquisitionService:
                         outcome="unsafe_url",
                     )
                 )
-        for value in [request.url, *request.alternate_urls]:
+        identity_values = [
+            request.doi,
+            request.url,
+            *request.alternate_urls,
+            request.pdf_url,
+            *request.alternate_pdf_urls,
+        ]
+        for value in identity_values:
             normalized = normalize_arxiv_id(value)
             if normalized and normalized not in normalized_ids:
                 normalized_ids.append(normalized)
@@ -273,6 +291,18 @@ class PDFAcquisitionService:
                 "arxiv_id",
             )
             candidates.append(candidate)
+        candidates.extend(
+            _PDFCandidate(
+                "alternate_pdf_url",
+                "provider_pdf_url",
+                url,
+                "existing_pdf",
+                "existing_pdf",
+                "alternate_pdf_url",
+            )
+            for url in request.alternate_pdf_urls
+            if url not in arxiv_pdf_urls
+        )
         return self._deduplicate_candidates(candidates, attempts)
 
     @classmethod

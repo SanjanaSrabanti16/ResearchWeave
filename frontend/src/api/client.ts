@@ -1,4 +1,7 @@
 import type {
+  CachedPaperAnalysisResponse,
+  GraphPayload,
+  GraphResponse,
   Paper,
   InsightsResponse,
   LLMProviderId,
@@ -32,6 +35,35 @@ export async function searchPapers(
     throw new APIError(await responseError(response, "Search failed"), response.status);
   }
   return (await response.json()) as SearchResponse;
+}
+
+export async function buildPaperGraph(
+  payload: GraphPayload,
+  signal?: AbortSignal,
+): Promise<GraphResponse> {
+  const response = await fetch(`${API_URL}/api/graph`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    signal,
+  });
+  if (!response.ok) {
+    throw new APIError(await responseError(response, "Graph generation failed"), response.status);
+  }
+  return (await response.json()) as GraphResponse;
+}
+
+export async function getCachedPaperAnalysis(
+  paperId: string,
+): Promise<CachedPaperAnalysisResponse> {
+  const response = await fetch(
+    `${API_URL}/api/papers/${encodeURIComponent(paperId)}/cached-analysis`,
+    { cache: "no-store" },
+  );
+  if (!response.ok) {
+    throw new APIError(await responseError(response, "Cached analysis lookup failed"), response.status);
+  }
+  return (await response.json()) as CachedPaperAnalysisResponse;
 }
 
 async function responseError(response: Response, fallback: string): Promise<string> {

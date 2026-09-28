@@ -18,6 +18,10 @@ import { PaperInsights } from "./PaperInsights";
 
 interface Props {
   paper: Paper;
+  initialDocument?: ParsedPaper | null;
+  initialInsights?: InsightsResponse | null;
+  initialProvider?: LLMProviderId | null;
+  onStateChanged?: () => Promise<void> | void;
 }
 
 const PROVIDER_LABELS: Record<LLMProviderId, string> = {
@@ -34,23 +38,35 @@ const PROVIDER_DESCRIPTIONS: Record<LLMProviderId, string> = {
     "Remote EVL-hosted model; requires configured EVL access and sends selected paper text to the EVL inference service.",
 };
 
-export function PaperPdfPanel({ paper }: Props) {
+export function PaperPdfPanel({
+  paper,
+  initialDocument = null,
+  initialInsights = null,
+  initialProvider = null,
+  onStateChanged,
+}: Props) {
   const [busy, setBusy] = useState(false);
   const [uploadRequired, setUploadRequired] = useState(false);
   const [file, setFile] = useState<File | null>(null);
-  const [document, setDocument] = useState<ParsedPaper | null>(null);
+  const [document, setDocument] = useState<ParsedPaper | null>(initialDocument);
   const [message, setMessage] = useState<string | null>(null);
-  const [insights, setInsights] = useState<InsightsResponse | null>(null);
+  const [insights, setInsights] = useState<InsightsResponse | null>(initialInsights);
   const [insightBusy, setInsightBusy] = useState(false);
   const [insightStage, setInsightStage] = useState("Selecting evidence");
   const [insightElapsed, setInsightElapsed] = useState(0);
   const [insightError, setInsightError] = useState<string | null>(null);
-  const [provider, setProvider] = useState<LLMProviderId>("ollama");
+  const [provider, setProvider] = useState<LLMProviderId>(initialProvider ?? "ollama");
   const [providers, setProviders] = useState<LLMProviderStatus[]>([
     { provider_id: "ollama", model: "local model", configured: true, cloud: false },
     { provider_id: "gemini", model: "Gemini", configured: false, cloud: true },
     { provider_id: "evl_gemma", model: "Gemma", configured: false, cloud: true },
   ]);
+
+  useEffect(() => {
+    setDocument(initialDocument);
+    setInsights(initialInsights);
+    if (initialProvider) setProvider(initialProvider);
+  }, [paper.id, initialDocument, initialInsights, initialProvider]);
 
   useEffect(() => {
     if (!document) return;
@@ -59,10 +75,16 @@ export function PaperPdfPanel({ paper }: Props) {
       .then((result) => {
         if (!active) return;
         setProviders(result.providers);
+        const cachedProvider = initialProvider
+          ? result.providers.find(
+              (item) => item.provider_id === initialProvider && item.configured,
+            )
+          : undefined;
         const preferred = result.providers.find(
           (item) => item.provider_id === result.default_provider && item.configured,
         );
-        if (preferred) setProvider(preferred.provider_id);
+        if (cachedProvider) setProvider(cachedProvider.provider_id);
+        else if (preferred) setProvider(preferred.provider_id);
       })
       .catch(() => {
         // Ollama remains the safe backward-compatible selection if status is unavailable.
@@ -70,7 +92,7 @@ export function PaperPdfPanel({ paper }: Props) {
     return () => {
       active = false;
     };
-  }, [document]);
+  }, [document, initialProvider]);
 
   useEffect(() => {
     if (!insightBusy) return;
@@ -91,6 +113,7 @@ export function PaperPdfPanel({ paper }: Props) {
       setInsights(null);
       setInsightError(null);
       setMessage(result.message);
+      if (result.document) await onStateChanged?.();
     } catch (error) {
       setUploadRequired(!(error instanceof APIError && error.status === 503));
       setMessage(error instanceof Error ? error.message : "PDF acquisition failed");
@@ -110,6 +133,7 @@ export function PaperPdfPanel({ paper }: Props) {
       setInsightError(null);
       setUploadRequired(false);
       setMessage(result.message);
+      if (result.document) await onStateChanged?.();
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "PDF upload failed");
     } finally {
@@ -124,9 +148,12 @@ export function PaperPdfPanel({ paper }: Props) {
     setInsightElapsed(0);
     setInsightError(null);
     try {
-      setInsights(await extractPaperInsights(document, setInsightStage, provider));
+      const result = await extractPaperInsights(document, setInsightStage, provider);
+      setInsights(result);
+      await onStateChanged?.();
     } catch (error) {
       setInsightError(error instanceof Error ? error.message : "Insight extraction failed");
+      await onStateChanged?.();
     } finally {
       setInsightBusy(false);
     }

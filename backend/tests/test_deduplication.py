@@ -47,6 +47,23 @@ def test_exact_normalized_title_merges() -> None:
     assert len(result) == 1
 
 
+def test_canonical_merge_sanitizes_title_and_abstract_metadata() -> None:
+    result = DeduplicationService().deduplicate(
+        [
+            paper(
+                "A <italic>Great</italic> Paper",
+                "semantic_scholar",
+                abstract="A <bold>useful</bold> result with <tex-math>x^2</tex-math>.",
+            ),
+            paper("A Great Paper", "openalex", abstract="Short result."),
+        ]
+    )
+
+    assert len(result) == 1
+    assert result[0].title == "A Great Paper"
+    assert result[0].abstract == "A useful result with x^2."
+
+
 def test_similar_but_different_titles_do_not_merge() -> None:
     result = DeduplicationService().deduplicate(
         [
@@ -227,3 +244,53 @@ def test_poorer_late_duplicate_does_not_replace_canonical_metadata() -> None:
     assert merged.venue == "Journal"
     assert merged.publication_year == 2024
     assert merged.authors == ["Ada Author"]
+
+
+def test_streetweave_multi_provider_representations_merge_into_one_work() -> None:
+    title = (
+        "StreetWeave: A Declarative Grammar for Street-Overlaid Visualization of Multivariate Data"
+    )
+    result = DeduplicationService().deduplicate(
+        [
+            paper(
+                title,
+                "openalex",
+                doi="10.1109/TVCG.2025.3634647",
+                openalex_id="W4417003572",
+                venue="IEEE Transactions on Visualization and Computer Graphics",
+                url="https://doi.org/10.1109/TVCG.2025.3634647",
+            ),
+            paper(
+                title,
+                "openalex",
+                doi="10.48550/arXiv.2508.07496",
+                openalex_id="W4416242310",
+                url="http://arxiv.org/abs/2508.07496",
+                pdf_url="https://arxiv.org/pdf/2508.07496",
+            ),
+            paper(
+                title,
+                "semantic_scholar",
+                doi="10.1109/tvcg.2025.3634647",
+                arxiv_id="2508.07496",
+                semantic_scholar_id="s2-streetweave",
+                pdf_url="https://pmc.ncbi.nlm.nih.gov/articles/PMC13340627/",
+            ),
+        ]
+    )
+
+    assert len(result) == 1
+    merged = result[0]
+    assert merged.doi == "10.1109/tvcg.2025.3634647"
+    assert merged.arxiv_id == "2508.07496"
+    assert merged.openalex_id == "W4417003572"
+    assert merged.semantic_scholar_id == "s2-streetweave"
+    assert set(merged.source_names) == {"openalex", "semantic_scholar"}
+    assert "https://arxiv.org/pdf/2508.07496" in [
+        merged.pdf_url,
+        *merged.alternate_pdf_urls,
+    ]
+    assert "https://pmc.ncbi.nlm.nih.gov/articles/PMC13340627/" in [
+        merged.pdf_url,
+        *merged.alternate_pdf_urls,
+    ]

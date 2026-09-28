@@ -190,7 +190,7 @@ describe("PaperPdfPanel", () => {
     };
     vi.mocked(extractPaperInsights).mockResolvedValue(insightResponse);
     const user = userEvent.setup();
-    render(<PaperPdfPanel paper={paper} />);
+    const { container } = render(<PaperPdfPanel paper={paper} />);
 
     await user.click(screen.getByRole("button", { name: "Get PDF" }));
     await user.click(await screen.findByRole("button", { name: "Extract grounded insights" }));
@@ -205,9 +205,24 @@ describe("PaperPdfPanel", () => {
     expect(
       screen.getByText("The paper does not explicitly state study limitations."),
     ).toBeInTheDocument();
-    for (const heading of ["Paper Overview", "Problem", "Methods", "Contributions", "Evaluation", "Findings", "Why It Matters", "Audience", "Limitations", "Future Work"]) {
+    for (const heading of ["Paper Overview", "Research Problem", "Methods", "Key Contributions", "Evaluation", "Main Findings", "Why It Matters", "Target Audience", "Limitations / Open Challenges", "Future Work"]) {
       expect(screen.getByRole("heading", { name: heading })).toBeInTheDocument();
     }
+    const cards = container.querySelectorAll<HTMLElement>(".insight-card");
+    expect(cards).toHaveLength(10);
+    expect(Array.from(cards, (card) => card.dataset.insightField)).toEqual([
+      "paper_overview", "research_problem", "methods", "key_contributions", "evaluation",
+      "main_findings", "why_it_matters", "target_audience", "limitations", "future_work",
+    ]);
+    expect(overview.closest(".insight-card")).toHaveAttribute(
+      "data-insight-field",
+      "paper_overview",
+    );
+    expect(overview.closest(".insight-card")).toHaveAttribute(
+      "data-surface-token",
+      "rw-periwinkle-light",
+    );
+    expect(screen.queryByText(/show more/i)).not.toBeInTheDocument();
     await user.click(screen.getByText("Evidence (1)"));
     expect(screen.getByText("“Section evidence.”")).toBeInTheDocument();
     expect(screen.getByText("chunk-1")).toBeInTheDocument();

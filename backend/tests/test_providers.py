@@ -91,6 +91,25 @@ def test_semantic_scholar_normalization() -> None:
     assert paper.pdf_url == "https://example.test/open.pdf"
 
 
+def test_provider_normalization_removes_markup_before_canonicalization() -> None:
+    paper = SemanticScholarProvider.normalize(
+        {
+            "paperId": "S3",
+            "title": "<italic>Agentic</italic> Systems",
+            "abstract": (
+                "A <bold>grounded</bold> result with "
+                "<inline-formula><tex-math>x &gt; 1</tex-math></inline-formula>."
+            ),
+        }
+    )
+
+    assert paper is not None
+    assert paper.title == "Agentic Systems"
+    assert paper.abstract == "A grounded result with x > 1."
+    assert "<" not in paper.title
+    assert "<" not in paper.abstract
+
+
 def test_arxiv_result_normalization() -> None:
     result = arxiv.Result(
         entry_id="http://arxiv.org/abs/2401.01234v2",

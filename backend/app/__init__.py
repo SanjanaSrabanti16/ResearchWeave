@@ -1,1 +1,1 @@
-"""Research Landscape Explorer backend."""
+"""ResearchWeave backend."""

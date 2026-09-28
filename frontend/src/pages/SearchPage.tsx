@@ -1,8 +1,8 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 
-import { searchPapers } from "../api/client";
-import { PaperCard } from "../components/PaperCard";
-import type { SearchResponse } from "../types/paper";
+import { buildPaperGraph, searchPapers } from "../api/client";
+import { GraphWorkspace } from "../components/GraphWorkspace";
+import type { GraphResponse, SearchResponse } from "../types/paper";
 
 const currentYear = new Date().getFullYear();
 
@@ -12,8 +12,11 @@ export function SearchPage() {
   const [endYear, setEndYear] = useState("");
   const [limit, setLimit] = useState(20);
   const [result, setResult] = useState<SearchResponse | null>(null);
+  const [graph, setGraph] = useState<GraphResponse | null>(null);
   const [loading, setLoading] = useState(false);
+  const [graphLoading, setGraphLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [graphError, setGraphError] = useState<string | null>(null);
   const controllerRef = useRef<AbortController | null>(null);
 
   useEffect(() => () => controllerRef.current?.abort(), []);
@@ -21,6 +24,7 @@ export function SearchPage() {
   function submit(event: FormEvent) {
     event.preventDefault();
     setError(null);
+    setGraphError(null);
     if (startYear && endYear && Number(startYear) > Number(endYear)) {
       setError("Start year must be before or equal to end year.");
       return;
@@ -29,6 +33,7 @@ export function SearchPage() {
     const controller = new AbortController();
     controllerRef.current = controller;
     setLoading(true);
+    setGraph(null);
     void searchPapers(
       {
         query,
@@ -38,16 +43,38 @@ export function SearchPage() {
       },
       controller.signal,
     )
-      .then(setResult)
+      .then((searchResult) => {
+        setResult(searchResult);
+        setLoading(false);
+        if (!searchResult.papers.length) return;
+        setGraphLoading(true);
+        return buildPaperGraph(
+          { query: searchResult.query, papers: searchResult.papers },
+          controller.signal,
+        )
+          .then(setGraph)
+          .catch((caught: unknown) => {
+            if (
+              typeof caught === "object" &&
+              caught !== null &&
+              "name" in caught &&
+              caught.name === "AbortError"
+            ) return;
+            setGraphError(
+              caught instanceof Error ? caught.message : "Graph generation failed unexpectedly.",
+            );
+          })
+          .finally(() => {
+            if (controllerRef.current === controller) setGraphLoading(false);
+          });
+      })
       .catch((caught: unknown) => {
         if (
           typeof caught === "object" &&
           caught !== null &&
           "name" in caught &&
           caught.name === "AbortError"
-        ) {
-          return;
-        }
+        ) return;
         setError(caught instanceof Error ? caught.message : "Search failed unexpectedly.");
       })
       .finally(() => {
@@ -56,67 +83,72 @@ export function SearchPage() {
   }
 
   return (
-    <main>
-      <section className="hero">
-        <p className="eyebrow">Open scholarly discovery</p>
-        <h1>Research Landscape Explorer</h1>
-        <p>Search three open scholarly sources and rank the literature by relevance to your question.</p>
-      </section>
-
-      <form className="search-form" onSubmit={submit}>
-        <label className="topic-field">
-          Research topic
-          <input
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder="e.g. AI agents for visualization systems"
-            minLength={2}
-            maxLength={500}
-            required
-          />
-        </label>
-        <div className="filters">
+    <main className="application-shell">
+      <header className="app-header">
+        <div className="brand-block">
+          <h1>ResearchWeave</h1>
+          <p>Explore a query-centered scholarly landscape.</p>
+        </div>
+        <form className="search-form" onSubmit={submit}>
+          <label className="topic-field">
+            Research topic
+            <input
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="e.g. AI agents for visualization systems"
+              minLength={2}
+              maxLength={500}
+              required
+            />
+          </label>
           <label>
             Start year
-            <input type="number" min="1800" max="2100" value={startYear} onChange={(e) => setStartYear(e.target.value)} placeholder="Any" />
+            <input type="number" min="1800" max="2100" value={startYear} onChange={(event) => setStartYear(event.target.value)} placeholder="Any" />
           </label>
           <label>
             End year
-            <input type="number" min="1800" max="2100" value={endYear} onChange={(e) => setEndYear(e.target.value)} placeholder={String(currentYear)} />
+            <input type="number" min="1800" max="2100" value={endYear} onChange={(event) => setEndYear(event.target.value)} placeholder={String(currentYear)} />
           </label>
           <label>
-            Results
-            <input type="number" min="5" max="50" value={limit} onChange={(e) => setLimit(Number(e.target.value))} required />
+            Papers
+            <input type="number" min="5" max="50" value={limit} onChange={(event) => setLimit(Number(event.target.value))} required />
           </label>
-          <button type="submit" disabled={loading}>{loading ? "Ranking…" : "Search papers"}</button>
-        </div>
-      </form>
+          <button type="submit" className="search-button" data-design-token="rw-periwinkle" disabled={loading}>{loading ? "Searching…" : "Search"}</button>
+        </form>
+      </header>
 
-      {loading && <div className="status loading" role="status">Retrieving and ranking papers. The first search may take several minutes while models download.</div>}
+      {loading && <div className="status loading" role="status">Searching papers…</div>}
       {error && <div className="status error" role="alert">{error}</div>}
 
       {result && !loading && (
-        <section className="results" aria-live="polite">
-          <div className="summary">
-            <div><strong>{result.candidate_count}</strong><span>candidates</span></div>
-            <div><strong>{result.deduplicated_count}</strong><span>unique papers</span></div>
-            <div><strong>{result.ranked_count}</strong><span>ranked results</span></div>
-          </div>
-          <div className="provider-status">
-            {Object.entries(result.provider_status).map(([provider, status]) => (
-              <span key={provider} className={`provider ${status === "error" ? "failed" : ""}`}>
-                {provider.replace("_", " ")}: {status}
+        <section className="search-output" aria-live="polite">
+          <div className="result-status-row">
+            <span>{result.papers.length} ranked papers</span>
+            {Object.entries(result.provider_status).map(([provider, health]) => (
+              <span key={provider} className={`provider ${health.status}`}>
+                {provider.replace("_", " ")}: {health.status}
+                {` (${health.successful_requests} succeeded, ${health.failed_requests} failed)`}
               </span>
             ))}
           </div>
+          {Object.entries(result.provider_status).map(([provider, health]) =>
+            health.message ? (
+              <div className="status warning" key={`${provider}-health`}>
+                {provider.replace("_", " ")}: {health.message}
+              </div>
+            ) : null,
+          )}
           {result.warnings.map((warning) => <div className="status warning" key={warning}>{warning}</div>)}
-          <div className="score-help">
-            <p><strong>Semantic Score:</strong> Bi-encoder similarity between the research query and the paper.</p>
-            <p><strong>Reranker Score:</strong> Raw model relevance score used to order papers. Higher values indicate greater relevance within this ranking model; scores are not directly comparable across different models.</p>
-          </div>
-          {result.papers.length ? result.papers.map((paper, index) => (
-            <PaperCard key={paper.id} paper={paper} rank={index + 1} />
-          )) : <div className="status">No matching papers were found.</div>}
+          {result.papers.length ? (
+            <GraphWorkspace
+              papers={result.papers}
+              graph={graph}
+              graphLoading={graphLoading}
+              graphError={graphError}
+            />
+          ) : (
+            <div className="status">No matching papers were found.</div>
+          )}
         </section>
       )}
     </main>

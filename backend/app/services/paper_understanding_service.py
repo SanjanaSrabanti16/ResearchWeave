@@ -967,6 +967,15 @@ class PaperUnderstandingService:
             diagnostics.context_strategy = provider.capabilities.context_strategy
         cached = await asyncio.to_thread(self.cache.get, key)
         if cached is not None and validate_insights(cached, document) == cached:
+            await asyncio.to_thread(
+                self.cache.put_current,
+                paper_id=document.paper_id,
+                document_fingerprint=fingerprint,
+                provider_id=provider.provider_id,
+                model=provider.model_id,
+                extraction_version=PIPELINE_VERSION,
+                insights=cached,
+            )
             if diagnostics is not None:
                 diagnostics.final_counts = {
                     field: len(getattr(cached, field)) for field in INSIGHT_FIELDS
@@ -1150,6 +1159,15 @@ class PaperUnderstandingService:
         if on_progress:
             await on_progress("Validating evidence")
         await asyncio.to_thread(self.cache.put, key, insights)
+        await asyncio.to_thread(
+            self.cache.put_current,
+            paper_id=document.paper_id,
+            document_fingerprint=fingerprint,
+            provider_id=provider.provider_id,
+            model=provider.model_id,
+            extraction_version=PIPELINE_VERSION,
+            insights=insights,
+        )
         return InsightsResponse(
             paper_id=document.paper_id,
             document_fingerprint=fingerprint,

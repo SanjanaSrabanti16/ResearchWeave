@@ -7,7 +7,12 @@ from app.models.api import SearchRequest
 from app.models.paper import PaperCandidate
 from app.providers.base import ProviderError
 from app.services.deduplication_service import DeduplicationService
-from app.services.search_service import AllProvidersFailedError, ProviderPacer, SearchService
+from app.services.search_service import (
+    AllProvidersFailedError,
+    ProviderPacer,
+    ProviderResult,
+    SearchService,
+)
 
 
 class MemoryCache:
@@ -79,8 +84,11 @@ async def test_partial_provider_failure_and_year_filtering() -> None:
     response = await service.search(SearchRequest(query="agents", start_year=2020, limit=5))
     assert response.candidate_count == 6
     assert response.deduplicated_count == 1
-    assert response.provider_status == {"good": "ok", "bad": "error"}
-    assert response.warnings == ["bad unavailable"]
+    assert response.provider_status["good"].status == "ok"
+    assert response.provider_status["good"].successful_requests == 2
+    assert response.provider_status["bad"].status == "unavailable"
+    assert response.provider_status["bad"].failed_requests == 1
+    assert response.warnings == []
     assert [paper.title for paper in response.papers] == ["In range"]
 
 
@@ -210,8 +218,10 @@ async def test_each_variant_uses_normal_provider_cache_key() -> None:
     first = await service.search(request)
     second = await service.search(request)
 
-    assert first.provider_status == {"openalex": "ok"}
-    assert second.provider_status == {"openalex": "cached"}
+    assert first.provider_status["openalex"].status == "ok"
+    assert first.provider_status["openalex"].cached_requests == 0
+    assert second.provider_status["openalex"].status == "ok"
+    assert second.provider_status["openalex"].cached_requests == 4
     assert len(provider.calls) == 4
     assert len(cache.entries) == 4
 
@@ -237,10 +247,38 @@ async def test_failed_provider_stops_after_first_variant_and_other_provider_comp
         SearchRequest(query="AI agents for visualizations", start_year=2025, end_year=2026)
     )
 
-    assert response.provider_status == {"slow_or_unavailable": "error", "available": "ok"}
-    assert response.warnings == ["slow_or_unavailable unavailable"]
+    assert response.provider_status["slow_or_unavailable"].status == "unavailable"
+    assert response.provider_status["available"].status == "ok"
+    assert response.warnings == []
     assert [paper.title for paper in response.papers] == ["Available result"]
     assert len(available.calls) == 4
+
+
+@pytest.mark.parametrize(
+    ("results", "expected_status", "successful", "failed"),
+    [
+        ([ProviderResult("source", [], "ok")], "ok", 1, 0),
+        (
+            [ProviderResult("source", [], "ok"), ProviderResult("source", [], "error")],
+            "degraded",
+            1,
+            1,
+        ),
+        ([ProviderResult("source", [], "error")], "unavailable", 0, 1),
+    ],
+)
+def test_provider_health_has_one_authoritative_aggregate_state(
+    results: list[ProviderResult],
+    expected_status: str,
+    successful: int,
+    failed: int,
+) -> None:
+    health = SearchService._provider_health("source", results)
+
+    assert health.status == expected_status
+    assert health.successful_requests == successful
+    assert health.failed_requests == failed
+    assert (health.message is None) is (expected_status == "ok")
 
 
 class CountingFailureProvider(StubProvider):

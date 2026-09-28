@@ -3,7 +3,7 @@ import json
 from datetime import UTC, datetime
 from typing import Annotated
 
-from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile, status
+from fastapi import APIRouter, File, Form, HTTPException, Request, Response, UploadFile, status
 from fastapi.responses import StreamingResponse
 
 from app.llm import (
@@ -14,7 +14,13 @@ from app.llm import (
     LLMTimeoutError,
     UnknownLLMProviderError,
 )
-from app.models.api import HealthResponse, SearchRequest, SearchResponse
+from app.models.api import (
+    CachedPaperAnalysisResponse,
+    GraphRequest,
+    HealthResponse,
+    SearchRequest,
+    SearchResponse,
+)
 from app.models.document import PDFAcquisitionRequest, PDFProcessingResponse
 from app.models.insights import (
     InsightsRequest,
@@ -22,6 +28,12 @@ from app.models.insights import (
     LLMProviderStatusResponse,
 )
 from app.parsers import PDFParserError, PDFParserUnavailableError
+from app.services.graph_semantics import (
+    GraphSeed,
+    GraphSemanticsInputError,
+    GraphSemanticsUnavailableError,
+)
+from app.services.graph_service import GraphService
 from app.services.insight_service import (
     InsightInputError,
     InsightOutputError,
@@ -51,6 +63,10 @@ def get_insight_service(request: Request) -> PaperUnderstandingService | Insight
     return request.app.state.insight_service
 
 
+def get_graph_service(request: Request) -> GraphService:
+    return request.app.state.graph_service
+
+
 @router.get("/health", response_model=HealthResponse)
 async def health(request: Request) -> HealthResponse:
     return HealthResponse(
@@ -72,6 +88,31 @@ async def search(payload: SearchRequest, request: Request) -> SearchResponse:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
         ) from exc
+
+
+@router.post("/api/graph", response_model=GraphSeed)
+async def graph(payload: GraphRequest, request: Request) -> GraphSeed:
+    try:
+        return await get_graph_service(request).build(payload)
+    except GraphSemanticsInputError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+        ) from exc
+    except GraphSemanticsUnavailableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+
+
+@router.get(
+    "/api/papers/{paper_id}/cached-analysis",
+    response_model=CachedPaperAnalysisResponse,
+)
+async def cached_paper_analysis(
+    paper_id: str, request: Request, response: Response
+) -> CachedPaperAnalysisResponse:
+    response.headers["Cache-Control"] = "no-store"
+    return await get_graph_service(request).cached_analysis(paper_id)
 
 
 @router.post("/api/papers/pdf/acquire", response_model=PDFProcessingResponse)

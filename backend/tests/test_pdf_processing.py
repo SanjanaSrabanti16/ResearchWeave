@@ -159,6 +159,72 @@ async def test_secure_download_rejects_non_pdf_and_oversized_content(
             await downloader.download("https://arxiv.org/paper.pdf")
 
 
+async def test_secure_download_retries_empty_arxiv_406_then_succeeds() -> None:
+    attempts = 0
+    delays: list[float] = []
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return httpx.Response(406, content=b"")
+        return httpx.Response(200, headers={"content-type": "application/pdf"}, content=PDF)
+
+    async def record_delay(seconds: float) -> None:
+        delays.append(seconds)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        downloader = SecurePDFDownloader(
+            client, max_bytes=100, timeout_seconds=2, resolver=public_resolver, sleeper=record_delay
+        )
+        content, _ = await downloader.download("https://arxiv.org/pdf/2401.12345.pdf")
+
+    assert content == PDF
+    assert attempts == 2
+    assert delays == [3.0]
+
+
+async def test_secure_download_stops_after_three_empty_arxiv_406_responses() -> None:
+    attempts = 0
+    delays: list[float] = []
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(406, content=b"")
+
+    async def record_delay(seconds: float) -> None:
+        delays.append(seconds)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        downloader = SecurePDFDownloader(
+            client, max_bytes=100, timeout_seconds=2, resolver=public_resolver, sleeper=record_delay
+        )
+        with pytest.raises(PDFDownloadError, match="repeatedly rejected.*406"):
+            await downloader.download("https://arxiv.org/pdf/2401.12345.pdf")
+
+    assert attempts == 3
+    assert delays == [3.0, 3.0]
+
+
+async def test_secure_download_does_not_retry_nonempty_arxiv_406() -> None:
+    attempts = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(406, content=b"real client error")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        downloader = SecurePDFDownloader(
+            client, max_bytes=100, timeout_seconds=2, resolver=public_resolver
+        )
+        with pytest.raises(PDFDownloadError, match="rejected.*406"):
+            await downloader.download("https://arxiv.org/pdf/2401.12345.pdf")
+
+    assert attempts == 1
+
+
 async def test_grobid_tei_mapping_has_stable_evidence_chunks() -> None:
     transport = httpx.MockTransport(
         lambda _: httpx.Response(200, headers={"content-type": "application/xml"}, text=TEI)
@@ -230,4 +296,7 @@ async def test_ident_parsed_document_cache_avoids_reparsing(tmp_path: Path) -> N
     assert first.paper_id == "paper-1"
     assert second.paper_id == "paper-2"
     cached_files = await asyncio.to_thread(lambda: list(tmp_path.glob("*.json")))
-    assert len(cached_files) == 1
+    assert len(cached_files) == 3
+    cache = ParsedDocumentCache(tmp_path)
+    assert cache.get_paper_state("paper-1") == first
+    assert cache.get_paper_state("paper-2") == second

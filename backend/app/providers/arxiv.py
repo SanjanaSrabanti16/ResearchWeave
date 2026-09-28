@@ -12,6 +12,7 @@ from app.services.normalization import (
     clean_text,
     normalize_arxiv_id,
     normalize_doi,
+    normalize_metadata_text,
     stable_paper_id,
 )
 
@@ -58,7 +59,7 @@ class ArxivProvider(SearchProvider):
 
     @classmethod
     def normalize(cls, result: arxiv.Result) -> PaperCandidate | None:
-        title = clean_text(result.title)
+        title = normalize_metadata_text(result.title)
         if not title:
             return None
         url = clean_text(result.entry_id)
@@ -69,7 +70,7 @@ class ArxivProvider(SearchProvider):
         return PaperCandidate(
             id=stable_paper_id(doi=doi, arxiv_id=arxiv_id, title=title),
             title=title,
-            abstract=clean_text(result.summary),
+            abstract=normalize_metadata_text(result.summary),
             authors=authors,
             publication_year=published.year,
             publication_date=published.date().isoformat(),

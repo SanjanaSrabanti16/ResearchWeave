@@ -7,7 +7,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TypeVar
 
-from app.models.api import SearchRequest, SearchResponse
+from app.models.api import ProviderHealth, SearchRequest, SearchResponse
 from app.models.paper import PaperCandidate
 from app.providers.base import ProviderError, SearchProvider
 from app.services.cache_service import CacheService
@@ -149,6 +149,28 @@ class SearchService:
             return False
         return not (end_year is not None and paper.publication_year > end_year)
 
+    @staticmethod
+    def _provider_health(_name: str, results: list[ProviderResult]) -> ProviderHealth:
+        successful = sum(result.status in {"ok", "cached"} for result in results)
+        failed = sum(result.status == "error" for result in results)
+        cached = sum(result.status == "cached" for result in results)
+        if successful and not failed:
+            status = "ok"
+            message = None
+        elif successful:
+            status = "degraded"
+            message = "Some query variants failed; partial results remain available."
+        else:
+            status = "unavailable"
+            message = "No requests succeeded; this provider is temporarily unavailable."
+        return ProviderHealth(
+            status=status,
+            successful_requests=successful,
+            failed_requests=failed,
+            cached_requests=cached,
+            message=message,
+        )
+
     async def search(self, request: SearchRequest) -> SearchResponse:
         variants = self.query_variants.generate(request.query)
         original_limit = min(100, max(20, math.ceil(self.candidate_target / len(self.providers))))
@@ -189,14 +211,14 @@ class SearchService:
             ranked_count=len(ranked),
             papers=ranked,
             provider_status={
-                provider.name: (
-                    "ok"
-                    if any(result.status == "ok" for result in group)
-                    else "cached"
-                    if any(result.status == "cached" for result in group)
-                    else "error"
-                )
+                provider.name: self._provider_health(provider.name, group)
                 for provider, group in zip(self.providers, by_provider, strict=True)
             },
-            warnings=list(dict.fromkeys(result.warning for result in results if result.warning)),
+            warnings=list(
+                dict.fromkeys(
+                    result.warning
+                    for result in results
+                    if result.warning and result.status != "error"
+                )
+            ),
         )

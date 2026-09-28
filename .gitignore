@@ -1,16 +1,60 @@
+# Environment and credentials
 .env
+.env.*
+!.env.example
+
+# Python
 .venv/
+venv/
 __pycache__/
 *.py[cod]
+*.egg-info/
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+build/
+
+# Local application state and generated data
+*.sqlite
 *.sqlite3
+*.db
+*.log
 backend/data/
+logs/
+tmp/
+temp/
+.tmp/
+
+# Local validation and paper artifacts (scripts and Markdown reports remain trackable)
+validation/**/*.json
+validation/**/fresh_insight_cache/
+validation/**/parsed_cache/
+validation/local_artifacts/
+validation/final_v*_diagnostics/
+test papers/
+/research-landscape-*.zip
+
+# Local model/provider caches
+.cache/
+.huggingface/
+huggingface-cache/
+.ollama/
+
+# Frontend
 frontend/node_modules/
 frontend/dist/
+frontend/coverage/
+frontend/.vite/
 *.tsbuildinfo
 frontend/vite.config.js
 frontend/vite.config.d.ts
-.vite/
+
+# Editors and operating systems
 .idea/
 .vscode/
+.DS_Store
+Thumbs.db
+Desktop.ini

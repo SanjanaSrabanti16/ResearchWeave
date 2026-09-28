@@ -28,14 +28,54 @@ export interface SearchPayload {
   limit: number;
 }
 
+export interface ProviderHealth {
+  status: "ok" | "degraded" | "unavailable";
+  successful_requests: number;
+  failed_requests: number;
+  cached_requests: number;
+  message: string | null;
+}
+
 export interface SearchResponse {
   query: string;
   candidate_count: number;
   deduplicated_count: number;
   ranked_count: number;
   papers: Paper[];
-  provider_status: Record<string, string>;
+  provider_status: Record<string, ProviderHealth>;
   warnings: string[];
+}
+
+export interface GraphNode {
+  paper_id: string;
+  title: string;
+  query_relevance: number;
+  node_weight: number;
+  node_radius: number;
+  information_completeness: number;
+  node_opacity: number;
+}
+
+export type EdgeSelectionReason = "source_top_k" | "target_top_k" | "both_top_k";
+
+export interface GraphEdge {
+  source_paper_id: string;
+  target_paper_id: string;
+  paper_similarity: number;
+  edge_weight: number;
+  selection_reason: EdgeSelectionReason;
+}
+
+export interface GraphResponse {
+  semantics_version: string;
+  embedding_model: string;
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+}
+
+export interface GraphPayload {
+  query: string;
+  papers: Paper[];
 }
 
 export interface DocumentChunk {
@@ -142,4 +182,11 @@ export interface InsightsResponse {
   extraction_version: string;
   cached: boolean;
   insights: InsightFields;
+}
+
+export interface CachedPaperAnalysisResponse {
+  paper_id: string;
+  document: ParsedPaper | null;
+  insights: InsightsResponse | null;
+  insight_provider: LLMProviderId | null;
 }
