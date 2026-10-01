@@ -1,6 +1,6 @@
 <table align="center">
   <tr>
-    <td align="center" bgcolor="#ffffff>
+    <td align="center" bgcolor="#ffffff">
       <img src="frontend/src/assets/researchWeave_Logo.png" alt="ResearchWeave" width="460">
     </td>
   </tr>
