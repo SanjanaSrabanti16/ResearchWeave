@@ -9,6 +9,7 @@ from app.services.normalization import (
     normalize_arxiv_id,
     normalize_doi,
     normalize_metadata_text,
+    normalize_pmcid,
     stable_paper_id,
 )
 
@@ -34,6 +35,7 @@ class SemanticScholarProvider(SearchProvider):
         external = item.get("externalIds") if isinstance(item.get("externalIds"), dict) else {}
         doi = normalize_doi(external.get("DOI"))
         arxiv_id = normalize_arxiv_id(external.get("ArXiv"))
+        pmcid = normalize_pmcid(external.get("PubMedCentral") or external.get("PMC"))
         author_rows = item.get("authors") if isinstance(item.get("authors"), list) else []
         authors = [
             name
@@ -55,6 +57,8 @@ class SemanticScholarProvider(SearchProvider):
             venue=clean_text(item.get("venue")),
             doi=doi,
             arxiv_id=arxiv_id,
+            pmcid=pmcid,
+            pmcids=[pmcid] if pmcid else [],
             semantic_scholar_id=clean_text(item.get("paperId")),
             url=clean_text(item.get("url")),
             pdf_url=clean_text(pdf.get("url")),
@@ -81,9 +85,13 @@ class SemanticScholarProvider(SearchProvider):
         try:
             results = response.json().get("data", [])
         except (ValueError, AttributeError) as exc:
-            raise ProviderError("semantic_scholar returned an invalid response") from exc
+            raise ProviderError(
+                "semantic_scholar returned an invalid response", category="parsing_error"
+            ) from exc
         if not isinstance(results, list):
-            raise ProviderError("semantic_scholar returned an invalid result set")
+            raise ProviderError(
+                "semantic_scholar returned an invalid result set", category="invalid_response"
+            )
         papers = [
             paper for item in results if isinstance(item, dict) if (paper := self.normalize(item))
         ]

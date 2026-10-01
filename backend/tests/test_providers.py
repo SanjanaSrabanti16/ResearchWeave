@@ -80,7 +80,11 @@ def test_semantic_scholar_normalization() -> None:
             "abstract": "An abstract",
             "year": 2023,
             "authors": [{"authorId": "1", "name": "Sam Scholar"}],
-            "externalIds": {"DOI": "10.3/TEST", "ArXiv": "2301.00123v1"},
+            "externalIds": {
+                "DOI": "10.3/TEST",
+                "ArXiv": "2301.00123v1",
+                "PubMedCentral": "PMC123456",
+            },
             "openAccessPdf": {"url": "https://example.test/open.pdf"},
             "citationCount": 5,
         }
@@ -89,6 +93,8 @@ def test_semantic_scholar_normalization() -> None:
     assert paper.semantic_scholar_id == "S2"
     assert paper.arxiv_id == "2301.00123"
     assert paper.pdf_url == "https://example.test/open.pdf"
+    assert paper.pmcid == "PMC123456"
+    assert paper.pmcids == ["PMC123456"]
 
 
 def test_provider_normalization_removes_markup_before_canonicalization() -> None:

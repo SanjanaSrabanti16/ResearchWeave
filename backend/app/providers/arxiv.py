@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 
 import arxiv
@@ -18,17 +19,31 @@ from app.services.normalization import (
 
 STOP_WORDS = {"a", "an", "and", "are", "for", "how", "in", "of", "on", "the", "to"}
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 10.0
+DEFAULT_USER_AGENT = "ResearchWeave/0.1.0 (open-source scholarly research tool)"
+
+logger = logging.getLogger(__name__)
 
 
 class _TimeoutSession:
     """Add a bounded timeout to the requests session owned by the arxiv package."""
 
-    def __init__(self, session: object, timeout_seconds: float) -> None:
+    def __init__(self, session: object, timeout_seconds: float, user_agent: str) -> None:
         self.session = session
         self.timeout_seconds = timeout_seconds
+        self.user_agent = user_agent
 
     def get(self, url: str, **kwargs: object):
         kwargs.setdefault("timeout", self.timeout_seconds)
+        supplied_headers = kwargs.get("headers")
+        headers = {
+            str(key): str(value)
+            for key, value in (
+                supplied_headers.items() if hasattr(supplied_headers, "items") else []
+            )
+            if str(key).casefold() != "user-agent"
+        }
+        headers["User-Agent"] = self.user_agent
+        kwargs["headers"] = headers
         return self.session.get(url, **kwargs)
 
 
@@ -44,6 +59,7 @@ class ArxivProvider(SearchProvider):
         arxiv_client: arxiv.Client | None = None,
         request_timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_SECONDS,
         lock_timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_SECONDS,
+        contact_email: str | None = None,
     ) -> None:
         super().__init__(client, retries, retry_base_seconds)
         self.arxiv_client = arxiv_client or arxiv.Client(
@@ -51,9 +67,15 @@ class ArxivProvider(SearchProvider):
         )
         if request_timeout_seconds <= 0 or lock_timeout_seconds <= 0:
             raise ValueError("arXiv timeouts must be positive")
+        contact = clean_text(contact_email)
+        self.user_agent = (
+            f"{DEFAULT_USER_AGENT}; contact={contact}" if contact else DEFAULT_USER_AGENT
+        )
         session = getattr(self.arxiv_client, "_session", None)
         if session is not None and not isinstance(session, _TimeoutSession):
-            self.arxiv_client._session = _TimeoutSession(session, request_timeout_seconds)
+            self.arxiv_client._session = _TimeoutSession(
+                session, request_timeout_seconds, self.user_agent
+            )
         self._search_lock = asyncio.Lock()
         self.lock_timeout_seconds = lock_timeout_seconds
 
@@ -109,7 +131,9 @@ class ArxivProvider(SearchProvider):
                 )
             except TimeoutError as exc:
                 raise ProviderError(
-                    "arxiv is busy; other provider results remain available"
+                    "arxiv is busy; other provider results remain available",
+                    category="timeout",
+                    attempts=1,
                 ) from exc
             try:
                 results = await asyncio.to_thread(lambda: list(self.arxiv_client.results(search)))
@@ -118,7 +142,35 @@ class ArxivProvider(SearchProvider):
         except Exception as exc:
             if isinstance(exc, ProviderError):
                 raise
-            raise ProviderError("arxiv is temporarily unavailable") from exc
+            status_code = getattr(exc, "status", None)
+            exception_name = type(exc).__name__.casefold()
+            if status_code == 429:
+                category = "rate_limited"
+            elif isinstance(status_code, int) and status_code >= 500:
+                category = "server_error"
+            elif "timeout" in exception_name:
+                category = "timeout"
+            elif (
+                isinstance(exc, ValueError) or "parse" in exception_name or "xml" in exception_name
+            ):
+                category = "parsing_error"
+            else:
+                category = "network_error"
+            retry_index = getattr(exc, "retry", self.retries)
+            attempts = min(retry_index, self.retries) + 1
+            logger.warning(
+                "provider_request_failed provider=arxiv operation=search "
+                "category=%s http_status=%s attempts=%s",
+                category,
+                status_code,
+                attempts,
+            )
+            raise ProviderError(
+                "arxiv is temporarily unavailable",
+                category=category,
+                status_code=status_code,
+                attempts=attempts,
+            ) from exc
         papers: list[PaperCandidate] = []
         for result in results:
             paper = self.normalize(result)

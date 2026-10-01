@@ -8,6 +8,11 @@ import type {
   LLMProviderStatusResponse,
   ParsedPaper,
   PDFProcessingResponse,
+  RelationshipProposal,
+  RelationshipProposalPayload,
+  RelationshipReview,
+  RelationshipReviewHistory,
+  RelationshipReviewPayload,
   SearchPayload,
   SearchResponse,
 } from "../types/paper";
@@ -15,7 +20,11 @@ import type {
 const API_URL = (import.meta.env.VITE_API_URL ?? "http://localhost:8000").replace(/\/$/, "");
 
 export class APIError extends Error {
-  constructor(message: string, readonly status: number) {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code?: string,
+  ) {
     super(message);
     this.name = "APIError";
   }
@@ -32,7 +41,7 @@ export async function searchPapers(
     signal,
   });
   if (!response.ok) {
-    throw new APIError(await responseError(response, "Search failed"), response.status);
+    throw await apiError(response, "Search failed");
   }
   return (await response.json()) as SearchResponse;
 }
@@ -48,7 +57,7 @@ export async function buildPaperGraph(
     signal,
   });
   if (!response.ok) {
-    throw new APIError(await responseError(response, "Graph generation failed"), response.status);
+    throw await apiError(response, "Graph generation failed");
   }
   return (await response.json()) as GraphResponse;
 }
@@ -61,21 +70,28 @@ export async function getCachedPaperAnalysis(
     { cache: "no-store" },
   );
   if (!response.ok) {
-    throw new APIError(await responseError(response, "Cached analysis lookup failed"), response.status);
+    throw await apiError(response, "Cached analysis lookup failed");
   }
   return (await response.json()) as CachedPaperAnalysisResponse;
 }
 
-async function responseError(response: Response, fallback: string): Promise<string> {
+async function apiError(response: Response, fallback: string): Promise<APIError> {
   let message = `${fallback} (${response.status})`;
+  let code: string | undefined;
   try {
-    const data = (await response.json()) as { detail?: string | Array<{ msg: string }> };
+    const data = (await response.json()) as {
+      detail?: string | Array<{ msg: string }> | { code?: string; message?: string };
+    };
     if (typeof data.detail === "string") message = data.detail;
     else if (Array.isArray(data.detail)) message = data.detail.map((item) => item.msg).join("; ");
+    else if (data.detail) {
+      if (data.detail.message) message = data.detail.message;
+      code = data.detail.code;
+    }
   } catch {
     // Retain the status-based fallback when the server returns non-JSON content.
   }
-  return message;
+  return new APIError(message, response.status, code);
 }
 
 export async function acquireAndParsePDF(paper: Paper): Promise<PDFProcessingResponse> {
@@ -87,6 +103,8 @@ export async function acquireAndParsePDF(paper: Paper): Promise<PDFProcessingRes
       doi: paper.doi,
       arxiv_id: paper.arxiv_id,
       arxiv_ids: paper.arxiv_ids ?? [],
+      pmcid: paper.pmcid ?? null,
+      pmcids: paper.pmcids ?? [],
       pdf_url: paper.pdf_url,
       alternate_pdf_urls: paper.alternate_pdf_urls ?? [],
       url: paper.url,
@@ -97,7 +115,7 @@ export async function acquireAndParsePDF(paper: Paper): Promise<PDFProcessingRes
     }),
   });
   if (!response.ok) {
-    throw new APIError(await responseError(response, "PDF acquisition failed"), response.status);
+    throw await apiError(response, "PDF acquisition failed");
   }
   return (await response.json()) as PDFProcessingResponse;
 }
@@ -114,7 +132,7 @@ export async function uploadAndParsePDF(
     body,
   });
   if (!response.ok) {
-    throw new APIError(await responseError(response, "PDF upload failed"), response.status);
+    throw await apiError(response, "PDF upload failed");
   }
   return (await response.json()) as PDFProcessingResponse;
 }
@@ -135,7 +153,7 @@ export async function extractPaperInsights(
     body: JSON.stringify({ document, ...(provider ? { provider } : {}) }),
   });
   if (!response.ok) {
-    throw new APIError(await responseError(response, "Insight extraction failed"), response.status);
+    throw await apiError(response, "Insight extraction failed");
   }
   if (!response.body) throw new Error("Insight progress stream is unavailable");
   const reader = response.body.getReader();
@@ -161,7 +179,79 @@ export async function extractPaperInsights(
 export async function getLLMProviders(): Promise<LLMProviderStatusResponse> {
   const response = await fetch(`${API_URL}/api/llm/providers`);
   if (!response.ok) {
-    throw new APIError(await responseError(response, "Provider status failed"), response.status);
+    throw await apiError(response, "Provider status failed");
   }
   return (await response.json()) as LLMProviderStatusResponse;
+}
+
+export async function proposePaperRelationship(
+  payload: RelationshipProposalPayload,
+): Promise<RelationshipProposal> {
+  const response = await fetch(`${API_URL}/api/relationships/propose`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    throw await apiError(response, "Relationship proposal failed");
+  }
+  return (await response.json()) as RelationshipProposal;
+}
+
+export async function getPaperRelationship(proposalId: string): Promise<RelationshipProposal> {
+  const response = await fetch(`${API_URL}/api/relationships/${encodeURIComponent(proposalId)}`, {
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw await apiError(response, "Relationship lookup failed");
+  }
+  return (await response.json()) as RelationshipProposal;
+}
+
+export async function reviewPaperRelationship(
+  proposalId: string,
+  payload: RelationshipReviewPayload,
+): Promise<RelationshipReview> {
+  const response = await fetch(
+    `${API_URL}/api/relationships/${encodeURIComponent(proposalId)}/review`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+  );
+  if (!response.ok) {
+    throw await apiError(response, "Relationship review failed");
+  }
+  return (await response.json()) as RelationshipReview;
+}
+
+export async function getPaperRelationshipHistory(
+  proposalId: string,
+): Promise<RelationshipReviewHistory> {
+  const response = await fetch(
+    `${API_URL}/api/relationships/${encodeURIComponent(proposalId)}/history`,
+    { cache: "no-store" },
+  );
+  if (!response.ok) {
+    throw await apiError(response, "Relationship history failed");
+  }
+  return (await response.json()) as RelationshipReviewHistory;
+}
+
+export async function getPaperRelationshipByPair(
+  sourcePaperId: string,
+  targetPaperId: string,
+): Promise<RelationshipProposal | null> {
+  const params = new URLSearchParams({
+    source_paper_id: sourcePaperId,
+    target_paper_id: targetPaperId,
+  });
+  const response = await fetch(`${API_URL}/api/relationships/by-pair?${params}`, {
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw await apiError(response, "Relationship cache lookup failed");
+  }
+  return (await response.json()) as RelationshipProposal | null;
 }

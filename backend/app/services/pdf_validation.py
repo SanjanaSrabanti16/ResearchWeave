@@ -184,3 +184,51 @@ class SecurePDFDownloader:
             except (httpx.TimeoutException, httpx.NetworkError) as exc:
                 raise PDFDownloadError("The PDF could not be downloaded") from exc
         raise PDFDownloadError("The PDF URL redirected too many times")
+
+    async def download_html(
+        self,
+        url: str,
+        *,
+        trusted_discovery: bool = False,
+        max_html_bytes: int = 2 * 1024 * 1024,
+    ) -> tuple[str, str]:
+        """Fetch one bounded public landing page under the same SSRF/redirect policy."""
+        current_url = url
+        for redirect_count in range(self.max_redirects + 1):
+            await validate_remote_url(
+                current_url,
+                resolver=self.resolver,
+                allowed_hosts=None if trusted_discovery else self.allowed_hosts,
+            )
+            try:
+                async with self.client.stream(
+                    "GET", current_url, follow_redirects=False, timeout=self.timeout_seconds
+                ) as response:
+                    if response.is_redirect:
+                        if redirect_count >= self.max_redirects:
+                            raise PDFDownloadError("The landing page redirected too many times")
+                        location = response.headers.get("location")
+                        if not location:
+                            raise PDFDownloadError("The landing page returned an invalid redirect")
+                        current_url = str(response.url.join(location))
+                        continue
+                    if response.status_code >= 400:
+                        raise PDFDownloadError(
+                            f"The landing page rejected the request ({response.status_code})"
+                        )
+                    content_type = response.headers.get("content-type", "").casefold()
+                    if "html" not in content_type:
+                        raise PDFValidationError("The remote resource is not an HTML landing page")
+                    chunks: list[bytes] = []
+                    size = 0
+                    async for chunk in response.aiter_bytes():
+                        size += len(chunk)
+                        if size > max_html_bytes:
+                            raise PDFTooLargeError("The landing page exceeds the safe size limit")
+                        chunks.append(chunk)
+                    return b"".join(chunks).decode("utf-8", errors="replace"), current_url
+            except PDFValidationError:
+                raise
+            except (httpx.TimeoutException, httpx.NetworkError) as exc:
+                raise PDFDownloadError("The landing page could not be downloaded") from exc
+        raise PDFDownloadError("The landing page redirected too many times")

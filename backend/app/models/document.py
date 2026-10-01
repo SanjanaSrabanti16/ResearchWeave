@@ -8,13 +8,19 @@ from pydantic import BaseModel, ConfigDict, Field
 class SourcePDF(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
-    acquisition_method: Literal["existing_pdf", "arxiv", "unpaywall", "upload"]
+    acquisition_method: Literal[
+        "existing_pdf", "arxiv", "unpaywall", "crossref", "pmc", "publisher", "upload"
+    ]
     acquisition_provenance: (
         Literal[
             "known_pdf_url",
             "alternate_pdf_url",
             "arxiv_id",
             "unpaywall",
+            "crossref",
+            "pmc",
+            "publisher_landing_page",
+            "doi_landing_page",
             "title_verified_arxiv_fallback",
             "upload",
         ]
@@ -76,6 +82,8 @@ class PDFAcquisitionRequest(BaseModel):
     doi: str | None = Field(default=None, max_length=300)
     arxiv_id: str | None = Field(default=None, max_length=100)
     arxiv_ids: list[str] = Field(default_factory=list, max_length=20)
+    pmcid: str | None = Field(default=None, max_length=40)
+    pmcids: list[str] = Field(default_factory=list, max_length=20)
     pdf_url: str | None = Field(default=None, max_length=2048)
     alternate_pdf_urls: list[str] = Field(default_factory=list, max_length=20)
     url: str | None = Field(default=None, max_length=2048)
@@ -100,11 +108,25 @@ class PDFAcquisitionAttempt(BaseModel):
         "provider_no_oa",
         "title_match_rejected",
         "network_error",
+        "pdf_link_discovered",
+        "no_pdf_link",
+        "authentication_required",
+        "circuit_open",
+        "deadline_exceeded",
     ]
 
 
 class PDFProcessingResponse(BaseModel):
-    status: Literal["existing_pdf", "arxiv", "unpaywall", "upload", "upload_required"]
+    status: Literal[
+        "existing_pdf",
+        "arxiv",
+        "unpaywall",
+        "crossref",
+        "pmc",
+        "publisher",
+        "upload",
+        "upload_required",
+    ]
     paper_id: str
     document: ParsedPaper | None = None
     message: str | None = None

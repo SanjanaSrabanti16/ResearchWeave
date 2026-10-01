@@ -19,7 +19,8 @@ INSIGHT_FIELDS = (
     "future_work",
 )
 EVIDENCE_QUOTE_MAX_LENGTH = 500
-PAPER_OVERVIEW_MAX_LENGTH = 1200
+PAPER_OVERVIEW_MAX_LENGTH = 6000
+INSIGHT_CLAIM_MAX_LENGTH = 6000
 
 
 class EvidenceReference(BaseModel):
@@ -32,10 +33,10 @@ class EvidenceReference(BaseModel):
 class InsightClaim(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    # The shared carrier accommodates a longer paper overview. Generation contracts
-    # keep every non-overview field at the existing 500-character maximum.
-    claim: str = Field(min_length=1, max_length=PAPER_OVERVIEW_MAX_LENGTH)
-    evidence: list[EvidenceReference] = Field(min_length=1)
+    claim: str = Field(min_length=1, max_length=INSIGHT_CLAIM_MAX_LENGTH)
+    # Markdown providers are encouraged to cite source chunks, but a useful
+    # paraphrase is not discarded merely because a provider omitted a citation.
+    evidence: list[EvidenceReference] = Field(default_factory=list)
 
 
 class InsightFields(BaseModel):
@@ -109,6 +110,14 @@ class LLMProviderStatus(BaseModel):
     model: str
     configured: bool
     cloud: bool
+    availability: Literal[
+        "configured",
+        "unconfigured",
+        "available",
+        "temporarily_unavailable",
+        "authentication_error",
+    ]
+    message: str
 
 
 class LLMProviderStatusResponse(BaseModel):

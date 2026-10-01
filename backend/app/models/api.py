@@ -33,6 +33,7 @@ class ProviderHealth(BaseModel):
 
 class SearchResponse(BaseModel):
     query: str
+    overall_status: Literal["success", "no_results"] = "success"
     candidate_count: int
     deduplicated_count: int
     ranked_count: int

@@ -9,6 +9,7 @@ from app.services.normalization import (
     normalize_arxiv_id,
     normalize_doi,
     normalize_metadata_text,
+    normalize_pmcid,
     normalize_title,
     stable_paper_id,
 )
@@ -198,6 +199,12 @@ class DeduplicationService:
         )
         arxiv_ids = _unique(value for paper in [base, *group] for value in _arxiv_identities(paper))
         arxiv_id = arxiv_ids[0] if arxiv_ids else None
+        pmcids = _unique(
+            pmcid
+            for paper in [base, *group]
+            for value in ([paper.pmcid] if paper.pmcid else []) + paper.pmcids
+            if (pmcid := normalize_pmcid(value))
+        )
         citations = [paper.citation_count for paper in group if paper.citation_count is not None]
         authors = max((paper.authors for paper in group), key=len, default=[])
         sources = _unique(source for paper in group for source in paper.source_names)
@@ -212,6 +219,8 @@ class DeduplicationService:
             doi=doi,
             arxiv_id=arxiv_id,
             arxiv_ids=arxiv_ids,
+            pmcid=pmcids[0] if pmcids else None,
+            pmcids=pmcids,
             openalex_id=first("openalex_id"),
             semantic_scholar_id=first("semantic_scholar_id"),
             url=landing_urls[0] if landing_urls else None,

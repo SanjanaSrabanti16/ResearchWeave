@@ -16,6 +16,7 @@ def test_same_doi_merges_and_preserves_metadata() -> None:
             abstract="A longer and more useful abstract.",
             citation_count=9,
             semantic_scholar_id="s2-id",
+            pmcid="PMC123456",
         ),
     ]
     result = DeduplicationService().deduplicate(papers)
@@ -23,6 +24,8 @@ def test_same_doi_merges_and_preserves_metadata() -> None:
     assert result[0].doi == "10.1/abc"
     assert result[0].citation_count == 9
     assert result[0].semantic_scholar_id == "s2-id"
+    assert result[0].pmcid == "PMC123456"
+    assert result[0].pmcids == ["PMC123456"]
     assert set(result[0].source_names) == {"openalex", "semantic_scholar"}
 
 

@@ -27,6 +27,13 @@ from app.models.insights import (
     InsightsResponse,
     LLMProviderStatusResponse,
 )
+from app.models.relationships import (
+    RelationshipProposal,
+    RelationshipProposalRequest,
+    RelationshipReview,
+    RelationshipReviewHistory,
+    RelationshipReviewRequest,
+)
 from app.parsers import PDFParserError, PDFParserUnavailableError
 from app.services.graph_semantics import (
     GraphSeed,
@@ -46,6 +53,7 @@ from app.services.pdf_service import PDFAcquisitionService
 from app.services.pdf_upload import read_pdf_upload
 from app.services.pdf_validation import PDFTooLargeError, PDFValidationError
 from app.services.ranking_service import RankingUnavailableError
+from app.services.relationship_service import RelationshipError, RelationshipService
 from app.services.search_service import AllProvidersFailedError, SearchService
 
 router = APIRouter()
@@ -65,6 +73,17 @@ def get_insight_service(request: Request) -> PaperUnderstandingService | Insight
 
 def get_graph_service(request: Request) -> GraphService:
     return request.app.state.graph_service
+
+
+def get_relationship_service(request: Request) -> RelationshipService:
+    return request.app.state.relationship_service
+
+
+def _relationship_http_error(exc: RelationshipError) -> HTTPException:
+    return HTTPException(
+        status_code=exc.status_code,
+        detail={"code": exc.code, "message": exc.message},
+    )
 
 
 @router.get("/health", response_model=HealthResponse)
@@ -102,6 +121,75 @@ async def graph(payload: GraphRequest, request: Request) -> GraphSeed:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
         ) from exc
+
+
+@router.post("/api/relationships/propose", response_model=RelationshipProposal)
+async def propose_relationship(
+    payload: RelationshipProposalRequest,
+    request: Request,
+) -> RelationshipProposal:
+    try:
+        return await get_relationship_service(request).propose(payload)
+    except RelationshipError as exc:
+        raise _relationship_http_error(exc) from exc
+
+
+@router.get("/api/relationships/by-pair", response_model=RelationshipProposal | None)
+async def get_relationship_by_pair(
+    source_paper_id: str,
+    target_paper_id: str,
+    request: Request,
+    response: Response,
+) -> RelationshipProposal | None:
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return await get_relationship_service(request).lookup_pair(
+            source_paper_id,
+            target_paper_id,
+        )
+    except RelationshipError as exc:
+        raise _relationship_http_error(exc) from exc
+
+
+@router.get("/api/relationships/{proposal_id}", response_model=RelationshipProposal)
+async def get_relationship(
+    proposal_id: str,
+    request: Request,
+    response: Response,
+) -> RelationshipProposal:
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return await get_relationship_service(request).get(proposal_id)
+    except RelationshipError as exc:
+        raise _relationship_http_error(exc) from exc
+
+
+@router.post("/api/relationships/{proposal_id}/review", response_model=RelationshipReview)
+async def review_relationship(
+    proposal_id: str,
+    payload: RelationshipReviewRequest,
+    request: Request,
+) -> RelationshipReview:
+    try:
+        return await get_relationship_service(request).review(proposal_id, payload)
+    except RelationshipError as exc:
+        raise _relationship_http_error(exc) from exc
+
+
+@router.get(
+    "/api/relationships/{proposal_id}/history",
+    response_model=RelationshipReviewHistory,
+)
+async def relationship_history(
+    proposal_id: str,
+    request: Request,
+    response: Response,
+) -> RelationshipReviewHistory:
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return await get_relationship_service(request).history(proposal_id)
+    except RelationshipError as exc:
+        raise _relationship_http_error(exc) from exc
 
 
 @router.get(

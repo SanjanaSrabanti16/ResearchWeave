@@ -24,9 +24,11 @@ interface Props {
   graph: GraphResponse;
   activePaperIds: string[];
   hoveredEdge: HoveredGraphEdge | null;
+  selectedEdge: GraphEdge | null;
   selectedPaperId: string | null;
   onHoverPaper: (paperId: string | null) => void;
   onHoverEdge: (edge: HoveredGraphEdge | null) => void;
+  onSelectEdge: (edge: GraphEdge) => void;
   onSelectPaper: (paperId: string) => void;
 }
 
@@ -45,18 +47,20 @@ export function ResearchGraph({
   graph,
   activePaperIds,
   hoveredEdge,
+  selectedEdge,
   selectedPaperId,
   onHoverPaper,
   onHoverEdge,
+  onSelectEdge,
   onSelectPaper,
 }: Props) {
   const svgRef = useRef<SVGSVGElement | null>(null);
-  const handlersRef = useRef({ onHoverPaper, onHoverEdge, onSelectPaper });
+  const handlersRef = useRef({ onHoverPaper, onHoverEdge, onSelectEdge, onSelectPaper });
   const [tooltip, setTooltip] = useState<TooltipState | null>(null);
 
   useEffect(() => {
-    handlersRef.current = { onHoverPaper, onHoverEdge, onSelectPaper };
-  }, [onHoverEdge, onHoverPaper, onSelectPaper]);
+    handlersRef.current = { onHoverPaper, onHoverEdge, onSelectEdge, onSelectPaper };
+  }, [onHoverEdge, onHoverPaper, onSelectEdge, onSelectPaper]);
 
   useEffect(() => {
     const element = svgRef.current;
@@ -83,10 +87,18 @@ export function ResearchGraph({
       .data(links)
       .join("line")
       .attr("class", "graph-edge")
+      .attr("role", "button")
+      .attr("tabindex", 0)
+      .attr("aria-label", (link) => {
+        const source = nodeById.get(link.edge.source_paper_id)?.title ?? "Paper A";
+        const target = nodeById.get(link.edge.target_paper_id)?.title ?? "Paper B";
+        return `Open relationship between ${source} and ${target}`;
+      })
       .attr("data-color-token", "rw-edge")
       .attr("data-source-id", (link) => link.edge.source_paper_id)
       .attr("data-target-id", (link) => link.edge.target_paper_id)
       .attr("data-edge-weight", (link) => link.edge.edge_weight)
+      .style("cursor", "pointer")
       .attr("stroke-opacity", 1)
       .attr("stroke-width", (link) => edgeWidth(link.edge.edge_weight))
       .on("mouseenter", (event, link) => {
@@ -112,6 +124,15 @@ export function ResearchGraph({
       .on("mouseleave", () => {
         handlersRef.current.onHoverEdge(null);
         setTooltip(null);
+      })
+      .on("click", (event, link) => {
+        if (!event.defaultPrevented) handlersRef.current.onSelectEdge(link.edge);
+      })
+      .on("keydown", (event, link) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          handlersRef.current.onSelectEdge(link.edge);
+        }
       });
 
     const nodeSelection = viewport
@@ -219,6 +240,9 @@ export function ResearchGraph({
     const active = new Set(activePaperIds);
     const hasActive = active.size > 0;
     const hasHoveredEdge = hoveredEdge !== null;
+    const selectedIds = new Set(
+      selectedEdge ? [selectedEdge.source_paper_id, selectedEdge.target_paper_id] : [],
+    );
     svg
       .selectAll<SVGCircleElement, SimulationNode>(".graph-node")
       .classed("is-active", (node) => active.has(node.paper_id))
@@ -227,7 +251,11 @@ export function ResearchGraph({
         (node) => hasHoveredEdge && active.has(node.paper_id),
       )
       .classed("is-selected", (node) => node.paper_id === selectedPaperId)
-      .classed("is-muted", (node) => hasActive && !active.has(node.paper_id));
+      .classed("is-selected-edge-endpoint", (node) => selectedIds.has(node.paper_id))
+      .classed(
+        "is-muted",
+        (node) => hasActive && !active.has(node.paper_id) && !selectedIds.has(node.paper_id),
+      );
     svg
       .selectAll<SVGLineElement, SimulationEdge>(".graph-edge")
       .classed("is-active", (link) => {
@@ -247,17 +275,29 @@ export function ResearchGraph({
           endpointId(link.target) === hoveredEdge.targetPaperId
         );
       })
+      .classed("is-selected-edge", (link) => {
+        if (!selectedEdge) return false;
+        return (
+          endpointId(link.source) === selectedEdge.source_paper_id &&
+          endpointId(link.target) === selectedEdge.target_paper_id
+        );
+      })
       .classed("is-muted", (link) => {
         const source = endpointId(link.source);
         const target = endpointId(link.target);
         if (hoveredEdge) {
+          if (
+            selectedEdge &&
+            source === selectedEdge.source_paper_id &&
+            target === selectedEdge.target_paper_id
+          ) return false;
           return !(
             source === hoveredEdge.sourcePaperId && target === hoveredEdge.targetPaperId
           );
         }
         return hasActive && !active.has(source) && !active.has(target);
       });
-  }, [activePaperIds, hoveredEdge, selectedPaperId]);
+  }, [activePaperIds, hoveredEdge, selectedEdge, selectedPaperId]);
 
   return (
     <div className="research-graph" data-testid="research-graph">
@@ -275,22 +315,57 @@ export function ResearchGraph({
 function GraphLegend() {
   return (
     <div className="graph-legend" aria-label="Graph legend">
-      <span><b>Node size</b> Relevance to your query <i className="size-small" />→<i className="size-large" /></span>
-      <span><b>Opacity</b> Information completeness: Metadata · Abstract · Parsed PDF · Insights</span>
-      <span>
-        <b>Edge width</b> Semantic similarity{" "}
-        <i
-          className="edge-thin"
-          data-edge-weight={MIN_EDGE_SIMILARITY}
-          style={{ height: `${edgeWidth(MIN_EDGE_SIMILARITY)}px` }}
-        />
-        →
-        <i
-          className="edge-thick"
-          data-edge-weight={1}
-          style={{ height: `${edgeWidth(1)}px` }}
-        />
-      </span>
+      <div className="graph-legend-group" data-testid="node-size-legend">
+        <b>Node size</b>
+        <div className="graph-legend-scale">
+          <span>Low</span>
+          <span className="graph-legend-examples" aria-hidden="true">
+            <i className="size-small" />
+            <i className="size-medium" />
+            <i className="size-large" />
+          </span>
+          <span>High</span>
+        </div>
+        <small>Query similarity</small>
+      </div>
+      <div className="graph-legend-group" data-testid="node-opacity-legend">
+        <b>Node opacity</b>
+        <div className="graph-legend-scale">
+          <span>Low</span>
+          <span className="graph-legend-examples" aria-hidden="true">
+            <i className="opacity-low" />
+            <i className="opacity-medium" />
+            <i className="opacity-high" />
+          </span>
+          <span>High</span>
+        </div>
+        <small>Information completeness</small>
+      </div>
+      <div className="graph-legend-group" data-testid="edge-width-legend">
+        <b>Edge width</b>
+        <div className="graph-legend-scale">
+          <span>Low</span>
+          <span className="graph-legend-examples" aria-hidden="true">
+            <i
+              className="edge-thin"
+              data-edge-weight={MIN_EDGE_SIMILARITY}
+              style={{ height: `${edgeWidth(MIN_EDGE_SIMILARITY)}px` }}
+            />
+            <i
+              className="edge-medium"
+              data-edge-weight={0.65}
+              style={{ height: `${edgeWidth(0.65)}px` }}
+            />
+            <i
+              className="edge-thick"
+              data-edge-weight={1}
+              style={{ height: `${edgeWidth(1)}px` }}
+            />
+          </span>
+          <span>High</span>
+        </div>
+        <small>Paper similarity</small>
+      </div>
     </div>
   );
 }

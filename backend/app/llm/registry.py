@@ -32,6 +32,8 @@ class LLMProviderRegistry:
                 "model": provider.model_id,
                 "configured": provider.configured,
                 "cloud": provider.capabilities.cloud,
+                "availability": provider.availability,
+                "message": provider.availability_message,
             }
             for provider in self._providers.values()
         ]

@@ -39,7 +39,7 @@ async def test_429_retries_and_honors_numeric_retry_after(monkeypatch) -> None:
 
     monkeypatch.setattr("app.providers.base.asyncio.sleep", fake_sleep)
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        response = await ProbeProvider(client, retries=1).request()
+        response = await ProbeProvider(client, retries=1, jitter=lambda: 0.0).request()
     assert response.status_code == 200
     assert calls == 2
     assert sleep_delays == [0.25]
@@ -60,7 +60,7 @@ async def test_5xx_retries_without_real_sleep(monkeypatch) -> None:
 
     monkeypatch.setattr("app.providers.base.asyncio.sleep", fake_sleep)
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        response = await ProbeProvider(client, retries=1).request()
+        response = await ProbeProvider(client, retries=1, jitter=lambda: 0.0).request()
     assert response.status_code == 200
     assert calls == 2
     assert sleep_delays == [0.5]
@@ -82,7 +82,7 @@ async def test_timeout_retries_without_real_sleep(monkeypatch) -> None:
 
     monkeypatch.setattr("app.providers.base.asyncio.sleep", fake_sleep)
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        response = await ProbeProvider(client, retries=1).request()
+        response = await ProbeProvider(client, retries=1, jitter=lambda: 0.0).request()
     assert response.status_code == 200
     assert calls == 2
 
@@ -103,6 +103,22 @@ async def test_retry_exhaustion_raises_provider_error(monkeypatch) -> None:
     monkeypatch.setattr("app.providers.base.asyncio.sleep", fake_sleep)
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(ProviderError, match="temporarily unavailable"):
-            await ProbeProvider(client, retries=2).request()
+            await ProbeProvider(client, retries=2, jitter=lambda: 0.0).request()
     assert calls == 3
     assert sleep_delays == [0.5, 1.0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [400, 401, 403])
+async def test_non_transient_client_errors_are_not_retried(status: int) -> None:
+    calls = 0
+
+    async def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(status)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(ProviderError):
+            await ProbeProvider(client, retries=3).request()
+    assert calls == 1

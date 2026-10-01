@@ -16,6 +16,7 @@ from app.services.graph_semantics import (
     GraphNodeSeed,
     GraphSeed,
     GraphSemanticsUnavailableError,
+    RelatedConcept,
 )
 from app.services.graph_service import GraphService, GraphStateResolver
 from app.services.insight_cache import InsightCache
@@ -44,7 +45,7 @@ def _seed() -> GraphSeed:
                 node_weight=0.5,
                 node_radius=20.59126,
                 information_completeness=0.78,
-                node_opacity=0.78,
+                node_opacity=0.846,
             ),
             GraphNodeSeed(
                 paper_id="paper-isolated",
@@ -53,8 +54,11 @@ def _seed() -> GraphSeed:
                 node_weight=0.2,
                 node_radius=14.96663,
                 information_completeness=0.4,
-                node_opacity=0.4,
+                node_opacity=0.58,
             ),
+        ],
+        related_concepts=[
+            RelatedConcept(text="agent systems", query_similarity=0.88),
         ],
         edges=[
             GraphEdgeSeed(
@@ -126,6 +130,8 @@ def test_graph_endpoint_preserves_frozen_semantics_and_all_selected_nodes(tmp_pa
     ]
     assert "embedding" not in str(payload["nodes"]).casefold()
     assert "embedding" not in str(payload["edges"]).casefold()
+    assert payload["related_concepts"] == [{"text": "agent systems", "query_similarity": 0.88}]
+    assert set(payload["related_concepts"][0]) == {"text", "query_similarity"}
     assert original_papers == _papers()
     assert [paper.id for paper in graph_service.requests[0].papers] == [
         "paper-a",

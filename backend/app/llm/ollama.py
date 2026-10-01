@@ -4,6 +4,7 @@ import httpx
 from pydantic import BaseModel
 
 from app.llm.base import (
+    LLMOutputBudgetExceeded,
     LLMOutputError,
     LLMProvider,
     LLMProviderCapabilities,
@@ -76,4 +77,50 @@ class OllamaProvider(LLMProvider):
             raise LLMOutputError("Local Ollama returned an invalid response") from exc
         if not isinstance(content, str):
             raise LLMOutputError("Local Ollama returned an invalid response")
+        return content
+
+    async def generate_text(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        max_output_tokens: int,
+        context: LLMRequestContext | None = None,
+    ) -> str:
+        del context
+        payload = {
+            "model": self.model_id,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "stream": False,
+            "think": False,
+            "options": {
+                "temperature": 0,
+                "num_predict": max_output_tokens,
+                "num_ctx": 8192,
+            },
+        }
+        try:
+            response = await self.client.post(f"{self.base_url}/api/chat", json=payload)
+        except httpx.TimeoutException as exc:
+            raise LLMTimeoutError("Local Ollama extraction timed out") from exc
+        except httpx.RequestError as exc:
+            raise LLMProviderUnavailableError("Local Ollama is unavailable") from exc
+        if response.status_code >= 400:
+            if response.status_code == 404 or response.status_code >= 500:
+                raise LLMProviderUnavailableError(
+                    f"Local Ollama or model {self.model_id} is unavailable"
+                )
+            raise LLMOutputError("Local Ollama rejected text generation")
+        try:
+            payload = response.json()
+            content = payload["message"]["content"]
+        except (KeyError, TypeError, ValueError) as exc:
+            raise LLMOutputError("Local Ollama returned an invalid response") from exc
+        if str(payload.get("done_reason", "")).casefold() in {"length", "max_tokens"}:
+            raise LLMOutputBudgetExceeded("Local Ollama output budget was exceeded")
+        if not isinstance(content, str) or not content.strip():
+            raise LLMOutputError("Local Ollama returned empty text output")
         return content

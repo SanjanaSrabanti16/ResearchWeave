@@ -8,9 +8,11 @@ import pytest
 from app.models.paper import Paper
 from app.services.graph_semantics import (
     MAX_RADIUS,
+    MIN_NODE_OPACITY,
     MIN_RADIUS,
     GraphSemanticsInputError,
     GraphSemanticsService,
+    relevance_to_opacity,
     relevance_to_radius,
 )
 
@@ -99,11 +101,14 @@ def test_relevance_and_radius_are_bounded_with_fixed_area_mapping() -> None:
 
     assert [node.query_relevance for node in nodes] == [1.0, 0.0]
     assert [node.node_radius for node in nodes] == [MAX_RADIUS, MIN_RADIUS]
+    assert [node.node_opacity for node in nodes] == [0.58, 0.58]
     assert relevance_to_radius(0.25) == pytest.approx(
         math.sqrt(MIN_RADIUS**2 + 0.25 * (MAX_RADIUS**2 - MIN_RADIUS**2))
     )
     assert all(0.0 <= node.query_relevance <= 1.0 for node in nodes)
     assert all(MIN_RADIUS <= node.node_radius <= MAX_RADIUS for node in nodes)
+    assert relevance_to_opacity(0.5) == pytest.approx(0.65)
+    assert all(MIN_NODE_OPACITY <= node.node_opacity <= 1.0 for node in nodes)
 
 
 def test_repeated_scoring_is_deterministic_and_missing_abstract_uses_title() -> None:

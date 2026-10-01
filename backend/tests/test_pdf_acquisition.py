@@ -5,6 +5,7 @@ from app.models.paper import PaperCandidate
 from app.providers.unpaywall import UnpaywallProvider
 from app.services.pdf_service import PDFAcquisitionService
 from app.services.pdf_validation import PDFDownloadError, PDFValidationError
+from app.services.provider_reliability import CircuitBreaker
 
 
 async def test_unpaywall_uses_best_open_access_pdf_and_identifying_email() -> None:
@@ -103,7 +104,7 @@ async def test_arxiv_acquisition_constructs_and_validates_official_pdf_url() -> 
     )
 
     assert result.status == "arxiv"
-    assert downloader.calls == [("https://arxiv.org/pdf/2401.12345.pdf", False)]
+    assert downloader.calls == [("https://arxiv.org/pdf/2401.12345", False)]
     assert result.document is not None
     assert result.document.source_pdf.acquisition_method == "arxiv"
     assert result.acquisition_provenance == "arxiv_id"
@@ -150,7 +151,7 @@ class FakeArxivProvider:
         return self.papers
 
 
-async def test_known_direct_pdf_succeeds_first_and_stops() -> None:
+async def test_known_arxiv_id_precedes_supplied_pdf_url() -> None:
     downloader = SequenceDownloader()
     service = PDFAcquisitionService(downloader, StaticUnpaywall(), RecordingProcessor())
 
@@ -162,15 +163,15 @@ async def test_known_direct_pdf_succeeds_first_and_stops() -> None:
         )
     )
 
-    assert [call[0] for call in downloader.calls] == ["https://arxiv.org/direct.pdf"]
-    assert result.status == "existing_pdf"
-    assert result.acquisition_provenance == "known_pdf_url"
+    assert [call[0] for call in downloader.calls] == ["https://arxiv.org/pdf/2401.12345"]
+    assert result.status == "arxiv"
+    assert result.acquisition_provenance == "arxiv_id"
     assert result.attempts[0].outcome == "success"
 
 
-async def test_failed_direct_pdf_falls_through_to_preserved_arxiv_id() -> None:
+async def test_preserved_arxiv_id_precedes_failed_supplied_pdf() -> None:
     direct = "https://arxiv.org/missing.pdf"
-    arxiv_url = "https://arxiv.org/pdf/2401.12345.pdf"
+    arxiv_url = "https://arxiv.org/pdf/2401.12345"
     downloader = SequenceDownloader({direct: PDFDownloadError("rejected (404)")})
     service = PDFAcquisitionService(downloader, StaticUnpaywall(), RecordingProcessor())
 
@@ -178,8 +179,8 @@ async def test_failed_direct_pdf_falls_through_to_preserved_arxiv_id() -> None:
         PDFAcquisitionRequest(paper_id="paper-1", pdf_url=direct, arxiv_id="2401.12345v2")
     )
 
-    assert [call[0] for call in downloader.calls] == [direct, arxiv_url]
-    assert [attempt.outcome for attempt in result.attempts] == ["not_found", "success"]
+    assert [call[0] for call in downloader.calls] == [arxiv_url]
+    assert [attempt.outcome for attempt in result.attempts] == ["success"]
     assert result.acquisition_provenance == "arxiv_id"
 
 
@@ -198,10 +199,7 @@ async def test_failed_direct_prefers_known_arxiv_before_other_provider_alternate
         )
     )
 
-    assert [call[0] for call in downloader.calls] == [
-        direct,
-        "https://arxiv.org/pdf/2401.12345.pdf",
-    ]
+    assert [call[0] for call in downloader.calls] == ["https://arxiv.org/pdf/2401.12345"]
     assert result.acquisition_provenance == "arxiv_id"
 
 
@@ -224,9 +222,15 @@ async def test_first_direct_pdf_failure_uses_second_provider_candidate() -> None
 
 
 async def test_arxiv_failure_falls_through_to_unpaywall_candidate() -> None:
+    extensionless = "https://arxiv.org/pdf/2401.12345"
     arxiv_url = "https://arxiv.org/pdf/2401.12345.pdf"
     oa_url = "https://repository.example/paper.pdf"
-    downloader = SequenceDownloader({arxiv_url: PDFDownloadError("rejected (403)")})
+    downloader = SequenceDownloader(
+        {
+            extensionless: PDFDownloadError("rejected (403)"),
+            arxiv_url: PDFDownloadError("rejected (403)"),
+        }
+    )
     unpaywall = StaticUnpaywall(oa_url)
     service = PDFAcquisitionService(downloader, unpaywall, RecordingProcessor())
 
@@ -236,7 +240,7 @@ async def test_arxiv_failure_falls_through_to_unpaywall_candidate() -> None:
         )
     )
 
-    assert [call[0] for call in downloader.calls] == [arxiv_url, oa_url]
+    assert [call[0] for call in downloader.calls] == [extensionless, arxiv_url, oa_url]
     assert downloader.calls[-1][1] is True
     assert unpaywall.calls == ["10.1/abc"]
     assert result.status == "unpaywall"
@@ -285,7 +289,7 @@ async def test_publisher_record_can_acquire_with_preserved_arxiv_identity() -> N
 
     assert result.status == "arxiv"
     assert result.document is not None
-    assert result.document.source_pdf.url == "https://arxiv.org/pdf/2401.54321.pdf"
+    assert result.document.source_pdf.url == "https://arxiv.org/pdf/2401.54321"
 
 
 async def test_arxiv_doi_is_an_acquisition_identity_for_publisher_record() -> None:
@@ -302,10 +306,10 @@ async def test_arxiv_doi_is_an_acquisition_identity_for_publisher_record() -> No
     assert result.status == "arxiv"
     assert result.document is not None
     assert result.document.paper_id == "canonical-paper"
-    assert result.document.source_pdf.url == "https://arxiv.org/pdf/2508.07496.pdf"
+    assert result.document.source_pdf.url == "https://arxiv.org/pdf/2508.07496"
 
 
-async def test_bad_semantic_scholar_landing_page_falls_through_to_known_arxiv() -> None:
+async def test_known_arxiv_precedes_bad_semantic_scholar_landing_page() -> None:
     landing = "https://pmc.ncbi.nlm.nih.gov/articles/PMC13340627/"
     arxiv_pdf = "https://arxiv.org/pdf/2508.07496.pdf"
     downloader = SequenceDownloader({landing: PDFValidationError("not served as a PDF")})
@@ -320,8 +324,8 @@ async def test_bad_semantic_scholar_landing_page_falls_through_to_known_arxiv() 
         )
     )
 
-    assert [call[0] for call in downloader.calls] == [landing, arxiv_pdf]
-    assert [attempt.outcome for attempt in result.attempts] == ["invalid_pdf", "success"]
+    assert [call[0] for call in downloader.calls] == ["https://arxiv.org/pdf/2508.07496"]
+    assert [attempt.outcome for attempt in result.attempts] == ["success"]
     assert result.status == "arxiv"
 
 
@@ -369,6 +373,54 @@ async def test_known_arxiv_candidate_does_not_depend_on_failing_metadata_provide
 
     assert result.status == "arxiv"
     assert all(attempt.route != "title_verified_arxiv_fallback" for attempt in result.attempts)
+
+
+async def test_open_search_circuit_does_not_block_known_id_pdf_or_call_search() -> None:
+    provider = FakeArxivProvider()
+    breaker = CircuitBreaker(failure_threshold=1)
+    breaker.record_failure(("arxiv", "search"), "rate_limited")
+    downloader = SequenceDownloader()
+    service = PDFAcquisitionService(
+        downloader,
+        StaticUnpaywall(),
+        RecordingProcessor(),
+        provider,
+        circuit_breaker=breaker,
+    )
+
+    result = await service.acquire(
+        PDFAcquisitionRequest(paper_id="known", title="Known paper", arxiv_id="2607.25489")
+    )
+
+    assert result.status == "arxiv"
+    assert downloader.calls == [("https://arxiv.org/pdf/2607.25489", False)]
+    assert provider.calls == []
+
+
+async def test_extensionless_failure_falls_back_to_pdf_suffix() -> None:
+    extensionless = "https://arxiv.org/pdf/2607.25489"
+    suffixed = f"{extensionless}.pdf"
+    downloader = SequenceDownloader({extensionless: PDFDownloadError("network failure")})
+    service = PDFAcquisitionService(downloader, StaticUnpaywall(), RecordingProcessor())
+
+    result = await service.acquire(PDFAcquisitionRequest(paper_id="known", arxiv_id="2607.25489"))
+
+    assert result.status == "arxiv"
+    assert [call[0] for call in downloader.calls] == [extensionless, suffixed]
+
+
+async def test_extensionless_known_id_preempts_failed_supplied_pdf_suffix() -> None:
+    extensionless = "https://arxiv.org/pdf/2607.25489"
+    suffixed = f"{extensionless}.pdf"
+    downloader = SequenceDownloader({suffixed: PDFDownloadError("rejected (404)")})
+    service = PDFAcquisitionService(downloader, StaticUnpaywall(), RecordingProcessor())
+
+    result = await service.acquire(
+        PDFAcquisitionRequest(paper_id="known", arxiv_id="2607.25489", pdf_url=suffixed)
+    )
+
+    assert result.status == "arxiv"
+    assert [call[0] for call in downloader.calls] == [extensionless]
 
 
 def fallback_paper(

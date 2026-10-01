@@ -9,7 +9,8 @@ from app.models.document import ParsedPaper
 from app.models.insights import InsightsResponse
 from app.services.graph_semantics import GraphSeed, GraphSemanticsService
 from app.services.insight_cache import InsightCache
-from app.services.insight_service import document_fingerprint, validate_insights
+from app.services.insight_markdown import validate_markdown_insights
+from app.services.insight_service import document_fingerprint
 from app.services.paper_understanding_service import PIPELINE_VERSION
 from app.services.parsed_document_cache import ParsedDocumentCache
 
@@ -49,7 +50,7 @@ class GraphStateResolver:
             if (
                 current is not None
                 and (current.provider_id, current.model) in configured_providers
-                and validate_insights(current.insights, document) == current.insights
+                and validate_markdown_insights(current.insights, document) == current.insights
             ):
                 cached_insights = current.insights
                 cached_provider = current.provider_id
@@ -67,7 +68,10 @@ class GraphStateResolver:
                         provider_id,
                     )
                     insights = self.insight_cache.get(key)
-                    if insights is not None and validate_insights(insights, document) == insights:
+                    if (
+                        insights is not None
+                        and validate_markdown_insights(insights, document) == insights
+                    ):
                         cached_insights = insights
                         cached_provider = provider_id
                         cached_model = model

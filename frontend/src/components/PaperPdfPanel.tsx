@@ -38,6 +38,18 @@ const PROVIDER_DESCRIPTIONS: Record<LLMProviderId, string> = {
     "Remote EVL-hosted model; requires configured EVL access and sends selected paper text to the EVL inference service.",
 };
 
+function providerAvailability(item: LLMProviderStatus) {
+  return item.availability ?? (item.configured ? "configured" : "unconfigured");
+}
+
+function providerStatusSuffix(item: LLMProviderStatus) {
+  const availability = providerAvailability(item);
+  if (availability === "unconfigured") return " (not configured)";
+  if (availability === "temporarily_unavailable") return " (temporarily unavailable)";
+  if (availability === "authentication_error") return " (authentication failed)";
+  return "";
+}
+
 export function PaperPdfPanel({
   paper,
   initialDocument = null,
@@ -57,10 +69,29 @@ export function PaperPdfPanel({
   const [insightError, setInsightError] = useState<string | null>(null);
   const [provider, setProvider] = useState<LLMProviderId>(initialProvider ?? "ollama");
   const [providers, setProviders] = useState<LLMProviderStatus[]>([
-    { provider_id: "ollama", model: "local model", configured: true, cloud: false },
-    { provider_id: "gemini", model: "Gemini", configured: false, cloud: true },
-    { provider_id: "evl_gemma", model: "Gemma", configured: false, cloud: true },
+    {
+      provider_id: "ollama",
+      model: "local model",
+      configured: true,
+      cloud: false,
+      availability: "configured",
+    },
+    {
+      provider_id: "gemini",
+      model: "Gemini",
+      configured: false,
+      cloud: true,
+      availability: "unconfigured",
+    },
+    {
+      provider_id: "evl_gemma",
+      model: "Gemma",
+      configured: false,
+      cloud: true,
+      availability: "unconfigured",
+    },
   ]);
+  const selectedProvider = providers.find((item) => item.provider_id === provider);
 
   useEffect(() => {
     setDocument(initialDocument);
@@ -153,6 +184,12 @@ export function PaperPdfPanel({
       await onStateChanged?.();
     } catch (error) {
       setInsightError(error instanceof Error ? error.message : "Insight extraction failed");
+      try {
+        const status = await getLLMProviders();
+        setProviders(status.providers);
+      } catch {
+        // Preserve the extraction error when provider-status refresh is unavailable.
+      }
       await onStateChanged?.();
     } finally {
       setInsightBusy(false);
@@ -219,16 +256,51 @@ export function PaperPdfPanel({
                 <option
                   key={item.provider_id}
                   value={item.provider_id}
-                  disabled={!item.configured}
+                  disabled={
+                    !item.configured || providerAvailability(item) === "authentication_error"
+                  }
                 >
                   {PROVIDER_LABELS[item.provider_id]}
-                  {!item.configured ? " (unavailable)" : ""}
+                  {providerStatusSuffix(item)}
                 </option>
               ))}
             </select>
             <p className="parser-provenance">
               {PROVIDER_DESCRIPTIONS[provider]}
             </p>
+            {selectedProvider &&
+              ["temporarily_unavailable", "authentication_error"].includes(
+                providerAvailability(selectedProvider),
+              ) && (
+                <div className="provider-fallback-status">
+                  <p className="pdf-message" role="status">
+                    {PROVIDER_LABELS[selectedProvider.provider_id]}: {selectedProvider.message}
+                  </p>
+                  <div className="provider-fallback-actions" aria-label="Analysis provider alternatives">
+                    <button type="button" className="secondary-button" onClick={extractInsights}>
+                      Retry {PROVIDER_LABELS[selectedProvider.provider_id]}
+                    </button>
+                    {providers
+                      .filter((item) => item.provider_id !== selectedProvider.provider_id)
+                      .filter((item) => item.configured)
+                      .filter((item) => providerAvailability(item) !== "authentication_error")
+                      .map((item) => (
+                        <button
+                          type="button"
+                          className="secondary-button"
+                          key={item.provider_id}
+                          onClick={() => {
+                            setProvider(item.provider_id);
+                            setInsights(null);
+                            setInsightError(null);
+                          }}
+                        >
+                          Use {PROVIDER_LABELS[item.provider_id]}
+                        </button>
+                      ))}
+                  </div>
+                </div>
+              )}
             <button
               type="button"
               className="secondary-button"

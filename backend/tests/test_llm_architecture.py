@@ -1460,6 +1460,7 @@ def _openai_status_error(error_type, status_code: int, message: str) -> Exceptio
 async def test_evl_gemma_missing_key_success_and_malformed_output() -> None:
     missing = EVLGemmaProvider(None, "https://sage200.evl.uic.edu", "gemma4")
     assert missing.configured is False
+    assert missing.availability == "unconfigured"
     with pytest.raises(LLMProviderUnavailableError, match="EVL_GEMMA_API_KEY"):
         await missing.generate_structured(
             system_prompt="system",
@@ -1494,6 +1495,10 @@ async def test_evl_gemma_missing_key_success_and_malformed_output() -> None:
     assert '"properties":{"value"' in call["messages"][1]["content"]
     assert "trailing commas" in call["messages"][1]["content"]
     assert "never exceed an array's maxItems" in call["messages"][1]["content"]
+
+    missing_url = EVLGemmaProvider("configured-key", "", "gemma4")
+    assert missing_url.configured is False
+    assert missing_url.availability == "unconfigured"
 
     extra_text = _evl_with(_FakeOpenAICompletions('Here is JSON:\n```json\n{"value":"ok"}\n```'))
     with pytest.raises(LLMOutputError, match=r"structured.?output"):
@@ -1667,24 +1672,33 @@ async def test_evl_diagnostic_artifacts_never_store_secret(tmp_path) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("error", "expected"),
+    ("error", "expected", "availability"),
     [
         (
             _openai_status_error(openai.AuthenticationError, 401, "bad credential"),
             LLMAuthenticationError,
+            "authentication_error",
         ),
         (
             _openai_status_error(openai.RateLimitError, 429, "limited"),
             LLMRateLimitError,
+            "temporarily_unavailable",
         ),
-        (openai.APITimeoutError(SimpleNamespace()), LLMTimeoutError),
+        (
+            openai.APITimeoutError(SimpleNamespace()),
+            LLMTimeoutError,
+            "temporarily_unavailable",
+        ),
         (
             _openai_status_error(openai.InternalServerError, 503, "unavailable"),
             LLMProviderUnavailableError,
+            "temporarily_unavailable",
         ),
     ],
 )
-async def test_evl_gemma_maps_common_errors(error: Exception, expected: type[Exception]) -> None:
+async def test_evl_gemma_maps_common_errors_and_tracks_safe_runtime_status(
+    error: Exception, expected: type[Exception], availability: str
+) -> None:
     provider = _evl_with(_FakeOpenAICompletions(error=error))
     with pytest.raises(expected):
         await provider.generate_structured(
@@ -1693,6 +1707,23 @@ async def test_evl_gemma_maps_common_errors(error: Exception, expected: type[Exc
             schema=_TinySchema,
             max_output_tokens=20,
         )
+    assert provider.availability == availability
+    assert provider.availability_message in {"Authentication failed", "Temporarily unavailable"}
+
+
+@pytest.mark.asyncio
+async def test_evl_success_marks_provider_available() -> None:
+    provider = _evl_with(_FakeOpenAICompletions('{"value":"ok"}'))
+
+    await provider.generate_structured(
+        system_prompt="system",
+        user_prompt="user",
+        schema=_TinySchema,
+        max_output_tokens=20,
+    )
+
+    assert provider.availability == "available"
+    assert provider.availability_message == "Available"
 
 
 @pytest.mark.asyncio
@@ -2356,6 +2387,8 @@ def test_api_old_request_explicit_providers_status_and_unavailable(tmp_path) -> 
         "model": "gemma4",
         "configured": True,
         "cloud": True,
+        "availability": "configured",
+        "message": "Configured; availability has not been checked yet",
     }
 
     with TestClient(_api_app(tmp_path / "unavailable", gemini_configured=False)) as client:

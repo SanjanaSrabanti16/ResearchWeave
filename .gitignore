@@ -28,12 +28,16 @@ tmp/
 temp/
 .tmp/
 
-# Local validation and paper artifacts (scripts and Markdown reports remain trackable)
-validation/**/*.json
-validation/**/fresh_insight_cache/
-validation/**/parsed_cache/
-validation/local_artifacts/
-validation/final_v*_diagnostics/
+# Private internal development documentation and validation artifacts
+validation/
+docs/
+GRAPH_UI_SPEC.md
+m2_final_provider_architecture_report.md
+search_latency_fix_report.md
+backend/GRAPH_SEMANTICS.md
+backend/evaluation/README.md
+
+# Local paper artifacts
 test papers/
 /research-landscape-*.zip
 

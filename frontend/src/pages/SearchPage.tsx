@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 
 import { buildPaperGraph, searchPapers } from "../api/client";
+import researchWeaveLogo from "../assets/researchWeave_Logo.png";
 import { GraphWorkspace } from "../components/GraphWorkspace";
 import type { GraphResponse, SearchResponse } from "../types/paper";
 
@@ -18,6 +19,22 @@ export function SearchPage() {
   const [error, setError] = useState<string | null>(null);
   const [graphError, setGraphError] = useState<string | null>(null);
   const controllerRef = useRef<AbortController | null>(null);
+  const activeSourceCount = result
+    ? Object.values(result.provider_status).filter(
+        (health) => health.status !== "unavailable" && health.successful_requests > 0,
+      ).length
+    : 0;
+  const sourceStatusSummary = result
+    ? Object.entries(result.provider_status)
+        .map(([provider, health]) => `${provider.replace("_", " ")}: ${health.status}`)
+        .join("; ")
+    : "";
+  const unavailableSourceCount = result
+    ? Object.values(result.provider_status).filter((health) => health.status === "unavailable").length
+    : 0;
+  const degradedSourceCount = result
+    ? Object.values(result.provider_status).filter((health) => health.status === "degraded").length
+    : 0;
 
   useEffect(() => () => controllerRef.current?.abort(), []);
 
@@ -86,8 +103,7 @@ export function SearchPage() {
     <main className="application-shell">
       <header className="app-header">
         <div className="brand-block">
-          <h1>ResearchWeave</h1>
-          <p>Explore a query-centered scholarly landscape.</p>
+          <img className="brand-logo" src={researchWeaveLogo} alt="ResearchWeave" />
         </div>
         <form className="search-form" onSubmit={submit}>
           <label className="topic-field">
@@ -123,22 +139,40 @@ export function SearchPage() {
       {result && !loading && (
         <section className="search-output" aria-live="polite">
           <div className="result-status-row">
-            <span>{result.papers.length} ranked papers</span>
-            {Object.entries(result.provider_status).map(([provider, health]) => (
-              <span key={provider} className={`provider ${health.status}`}>
-                {provider.replace("_", " ")}: {health.status}
-                {` (${health.successful_requests} succeeded, ${health.failed_requests} failed)`}
+            <span className="ranked-paper-count">{result.papers.length} ranked papers</span>
+            <span className="related-concepts-label">Related to your query</span>
+            {graph?.related_concepts.map((concept) => (
+              <span className="related-concept-chip" key={concept.text}>
+                {concept.text}
               </span>
             ))}
+            {graphLoading && !graph && (
+              <span className="related-concepts-loading">Finding concepts…</span>
+            )}
+            <details className="sources-summary" title={sourceStatusSummary}>
+              <summary aria-label={`${activeSourceCount} active scholarly sources`}>
+                Sources · {activeSourceCount} active
+                {degradedSourceCount > 0 ? ` · ${degradedSourceCount} degraded` : ""}
+                {unavailableSourceCount > 0 ? ` · ${unavailableSourceCount} unavailable` : ""}
+              </summary>
+              <div className="source-status-details">
+                {Object.entries(result.provider_status).map(([provider, health]) => (
+                  <p key={`${provider}-health`}>
+                    <strong>{provider.replaceAll("_", " ")}</strong> — {health.status === "ok" ? "active" : health.status}
+                    {health.message ? `: ${health.message}` : ""}
+                  </p>
+                ))}
+                {result.warnings.map((warning) => <p key={warning}>{warning}</p>)}
+              </div>
+            </details>
           </div>
-          {Object.entries(result.provider_status).map(([provider, health]) =>
+          {!result.papers.length && Object.entries(result.provider_status).map(([provider, health]) =>
             health.message ? (
               <div className="status warning" key={`${provider}-health`}>
-                {provider.replace("_", " ")}: {health.message}
+                {provider.replaceAll("_", " ")}: {health.message}
               </div>
             ) : null,
           )}
-          {result.warnings.map((warning) => <div className="status warning" key={warning}>{warning}</div>)}
           {result.papers.length ? (
             <GraphWorkspace
               papers={result.papers}

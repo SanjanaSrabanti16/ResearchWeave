@@ -5,7 +5,7 @@ import arxiv
 import httpx
 import pytest
 
-from app.providers.arxiv import ArxivProvider, _TimeoutSession
+from app.providers.arxiv import DEFAULT_USER_AGENT, ArxivProvider, _TimeoutSession
 from app.providers.base import ProviderError
 
 
@@ -44,7 +44,7 @@ async def test_arxiv_client_has_safe_paging_rate_limit_and_retries() -> None:
         assert provider.arxiv_client._session.timeout_seconds == 10.0
 
 
-def test_arxiv_timeout_session_applies_default_and_preserves_explicit_timeout() -> None:
+def test_arxiv_timeout_session_applies_timeout_and_descriptive_user_agent() -> None:
     class RecordingSession:
         def __init__(self) -> None:
             self.calls: list[dict[str, object]] = []
@@ -54,12 +54,25 @@ def test_arxiv_timeout_session_applies_default_and_preserves_explicit_timeout() 
             return object()
 
     delegate = RecordingSession()
-    session = _TimeoutSession(delegate, 7.5)
+    session = _TimeoutSession(delegate, 7.5, DEFAULT_USER_AGENT)
 
     session.get("https://export.arxiv.org/api/query")
-    session.get("https://export.arxiv.org/api/query", timeout=2.0)
+    session.get(
+        "https://export.arxiv.org/api/query",
+        timeout=2.0,
+        headers={"user-agent": "generic", "Accept": "application/atom+xml"},
+    )
 
-    assert delegate.calls == [{"timeout": 7.5}, {"timeout": 2.0}]
+    assert delegate.calls == [
+        {"timeout": 7.5, "headers": {"User-Agent": DEFAULT_USER_AGENT}},
+        {
+            "timeout": 2.0,
+            "headers": {
+                "Accept": "application/atom+xml",
+                "User-Agent": DEFAULT_USER_AGENT,
+            },
+        },
+    ]
 
 
 @pytest.mark.asyncio
@@ -125,3 +138,28 @@ async def test_arxiv_library_failures_become_provider_errors(failure: Exception)
             await provider.search("visual agents", 20)
 
     assert error.value.__cause__ is failure
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure", "category", "status"),
+    [
+        (arxiv.HTTPError("https://export.arxiv.org/api/query", 2, 429), "rate_limited", 429),
+        (arxiv.HTTPError("https://export.arxiv.org/api/query", 2, 503), "server_error", 503),
+        (TimeoutError("timed out"), "timeout", None),
+        (ValueError("malformed Atom"), "parsing_error", None),
+    ],
+)
+async def test_arxiv_failures_have_safe_bounded_diagnostics(
+    failure: Exception, category: str, status: int | None
+) -> None:
+    fake_client = FakeArxivClient(error=failure)
+    async with httpx.AsyncClient() as async_client:
+        provider = ArxivProvider(async_client, retries=2, arxiv_client=fake_client)
+        with pytest.raises(ProviderError) as caught:
+            await provider.search("visual agents", 20)
+
+    assert caught.value.category == category
+    assert caught.value.status_code == status
+    assert caught.value.attempts == 3
+    assert "visual agents" not in str(caught.value)

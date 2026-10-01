@@ -17,6 +17,7 @@ from app.services.graph_semantics import (
     GraphSemanticsService,
     format_graph_seed_audit,
     information_completeness,
+    relevance_to_opacity,
     select_sparse_edges,
 )
 
@@ -41,7 +42,7 @@ class MappingEncoder:
                 title = text.splitlines()[0].removeprefix("Title: ")
                 encoded.append(self.vectors[title])
             else:
-                raise AssertionError(f"Unexpected embedding input: {text}")
+                encoded.append([0.5, 0.5, 0.5, 0.5])
         return np.asarray(encoded, dtype=float)
 
 
@@ -86,7 +87,7 @@ def test_information_completeness_states(
     assert 0.0 <= completeness <= 1.0
 
 
-def test_highest_valid_information_state_wins_and_equals_opacity() -> None:
+def test_highest_valid_information_state_remains_available_but_relevance_drives_opacity() -> None:
     paper = Paper(id="paper", title="Complete paper", abstract="Available abstract")
     node = GraphSemanticsService("existing-model", NeverEncoder()).build_node_seeds(
         "Complete paper",
@@ -96,10 +97,10 @@ def test_highest_valid_information_state_wins_and_equals_opacity() -> None:
     )[0]
 
     assert node.information_completeness == INSIGHTS_COMPLETENESS
-    assert node.node_opacity == node.information_completeness
+    assert node.node_opacity == 1.0
 
 
-def test_opacity_is_independent_of_query_relevance_and_metadata() -> None:
+def test_opacity_is_independent_of_metadata_at_equal_query_relevance() -> None:
     vectors = {"Same content": [0.8, 0.6, 0.0, 0.0]}
     papers = [
         Paper(
@@ -125,10 +126,10 @@ def test_opacity_is_independent_of_query_relevance_and_metadata() -> None:
 
     assert nodes[0].information_completeness == nodes[1].information_completeness == 0.55
     assert nodes[0].node_opacity == nodes[1].node_opacity
-    assert nodes[0].node_opacity == ABSTRACT_COMPLETENESS
+    assert nodes[0].node_opacity == pytest.approx(relevance_to_opacity(0.55))
 
 
-def test_same_completeness_keeps_same_opacity_at_different_query_relevance() -> None:
+def test_same_completeness_uses_same_opacity_at_different_query_relevance() -> None:
     paper = Paper(id="paper", title="Exact Paper Title", abstract="Available abstract")
     exact_node = GraphSemanticsService("existing-model", NeverEncoder()).build_node_seeds(
         "Exact Paper Title", [paper]
@@ -139,7 +140,8 @@ def test_same_completeness_keeps_same_opacity_at_different_query_relevance() -> 
     ).build_node_seeds("unrelated query", [paper])[0]
 
     assert exact_node.query_relevance > weak_node.query_relevance
-    assert exact_node.node_opacity == weak_node.node_opacity == ABSTRACT_COMPLETENESS
+    assert exact_node.node_opacity == weak_node.node_opacity
+    assert exact_node.node_opacity == pytest.approx(relevance_to_opacity(0.55))
 
 
 def test_similarity_is_symmetric_bounded_semantic_and_title_fallback_is_safe() -> None:
@@ -368,8 +370,12 @@ def test_realistic_graph_fixture_is_sparse_separates_semantics_and_keeps_outlier
     assert len(first.edges) == 9
     assert len(first.edges) < len(papers) * (len(papers) - 1) // 2
     assert nodes["wireless-a"].node_radius > nodes["botany-f"].node_radius
-    assert nodes["wireless-a"].node_opacity == INSIGHTS_COMPLETENESS
-    assert nodes["visual-d"].node_opacity == PARSED_PDF_COMPLETENESS
+    assert nodes["wireless-a"].node_opacity == pytest.approx(
+        relevance_to_opacity(nodes["wireless-a"].information_completeness)
+    )
+    assert nodes["visual-d"].node_opacity == pytest.approx(
+        relevance_to_opacity(nodes["visual-d"].information_completeness)
+    )
     assert all(edge.edge_weight == edge.paper_similarity for edge in first.edges)
     assert [paper.model_dump() for paper in papers] == original_values
     audit = format_graph_seed_audit(first)

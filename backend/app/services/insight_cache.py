@@ -78,6 +78,16 @@ class InsightCache:
             return None
         return state
 
+    def get_latest_current(self, paper_id: str) -> CurrentInsightState | None:
+        """Read the latest recorded state without treating stale provenance as current."""
+        try:
+            state = CurrentInsightState.model_validate_json(
+                self._paper_state_path(paper_id).read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError):
+            return None
+        return state if state.paper_id == paper_id else None
+
     def put_current(
         self,
         *,

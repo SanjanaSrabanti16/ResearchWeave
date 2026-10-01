@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 import threading
 from collections.abc import Sequence, Set
 from typing import Literal
@@ -14,13 +15,77 @@ from app.services.ranking_service import BiEncoder, is_exact_title_match
 
 MIN_RADIUS = 8.0
 MAX_RADIUS = 28.0
+MIN_NODE_OPACITY = 0.30
 METADATA_COMPLETENESS = 0.40
 ABSTRACT_COMPLETENESS = 0.55
 PARSED_PDF_COMPLETENESS = 0.78
 INSIGHTS_COMPLETENESS = 1.00
 K_NEIGHBORS = 3
 MIN_EDGE_SIMILARITY = 0.35
-GRAPH_SEMANTICS_VERSION = "m3.4-m3.6-v2"
+GRAPH_SEMANTICS_VERSION = "m3.4-m3.6-v4"
+MAX_RELATED_CONCEPTS = 7
+MAX_CONCEPT_CANDIDATES = 256
+
+_CONCEPT_STOPWORDS = frozenset(
+    {
+        "a",
+        "about",
+        "an",
+        "and",
+        "are",
+        "as",
+        "at",
+        "be",
+        "been",
+        "between",
+        "by",
+        "can",
+        "for",
+        "from",
+        "has",
+        "have",
+        "how",
+        "in",
+        "into",
+        "is",
+        "it",
+        "its",
+        "of",
+        "on",
+        "or",
+        "our",
+        "that",
+        "the",
+        "their",
+        "these",
+        "this",
+        "through",
+        "to",
+        "toward",
+        "towards",
+        "using",
+        "via",
+        "we",
+        "were",
+        "with",
+    }
+)
+_GENERIC_CONCEPT_TERMS = frozenset(
+    {
+        "analysis",
+        "approach",
+        "data",
+        "method",
+        "methods",
+        "paper",
+        "research",
+        "result",
+        "results",
+        "study",
+    }
+)
+_CONCEPT_FRAGMENT_PATTERN = re.compile(r"[.!?;:\n()\[\]{}]+")
+_CONCEPT_TOKEN_PATTERN = re.compile(r"[^\W_]+(?:[-'][^\W_]+)*", re.UNICODE)
 
 _TITLE_STOPWORDS = frozenset(
     {"a", "an", "and", "for", "from", "in", "of", "on", "the", "to", "with"}
@@ -68,15 +133,28 @@ class GraphNodeSeed(BaseModel):
     node_weight: float = Field(ge=0.0, le=1.0)
     node_radius: float = Field(ge=MIN_RADIUS, le=MAX_RADIUS)
     information_completeness: float = Field(ge=0.0, le=1.0)
-    node_opacity: float = Field(ge=0.0, le=1.0)
+    node_opacity: float = Field(ge=MIN_NODE_OPACITY, le=1.0)
 
     @model_validator(mode="after")
     def enforce_visual_semantics(self) -> GraphNodeSeed:
         if self.node_weight != self.query_relevance:
             raise ValueError("node_weight must equal query_relevance")
-        if self.node_opacity != self.information_completeness:
-            raise ValueError("node_opacity must equal information_completeness")
+        if not math.isclose(
+            self.node_opacity,
+            relevance_to_opacity(self.information_completeness),
+            abs_tol=1e-12,
+        ):
+            raise ValueError("node_opacity must be derived from information_completeness")
         return self
+
+
+class RelatedConcept(BaseModel):
+    """A compact result-set concept ranked against the original query."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    text: str = Field(min_length=1, max_length=120)
+    query_similarity: float = Field(ge=0.0, le=1.0)
 
 
 class GraphEdgeSeed(BaseModel):
@@ -108,6 +186,7 @@ class GraphSeed(BaseModel):
     embedding_model: str = Field(min_length=1)
     nodes: list[GraphNodeSeed]
     edges: list[GraphEdgeSeed]
+    related_concepts: list[RelatedConcept] = Field(default_factory=list)
 
 
 def relevance_to_radius(relevance: float) -> float:
@@ -116,6 +195,14 @@ def relevance_to_radius(relevance: float) -> float:
         raise GraphSemanticsInputError("Query relevance must be finite")
     weight = min(1.0, max(0.0, float(relevance)))
     return math.sqrt(MIN_RADIUS**2 + weight * (MAX_RADIUS**2 - MIN_RADIUS**2))
+
+
+def relevance_to_opacity(completeness: float) -> float:
+    """Map existing information completeness to a visible, bounded opacity."""
+    if not math.isfinite(completeness):
+        raise GraphSemanticsInputError("Information completeness must be finite")
+    weight = min(1.0, max(0.0, float(completeness)))
+    return MIN_NODE_OPACITY + weight * (1.0 - MIN_NODE_OPACITY)
 
 
 def _canonical_relevance(cosine_similarity: float) -> float:
@@ -129,6 +216,89 @@ def _paper_representation(paper: Paper) -> str:
     if paper.abstract:
         representation += f"\nAbstract: {paper.abstract}"
     return representation
+
+
+def _singular_concept_token(token: str) -> str:
+    parts = token.casefold().split("-")
+    normalized: list[str] = []
+    for part in parts:
+        if len(part) > 4 and part.endswith("ies"):
+            part = f"{part[:-3]}y"
+        elif len(part) > 3 and part.endswith("s") and not part.endswith(("is", "ss", "us")):
+            part = part[:-1]
+        normalized.append(part)
+    return "-".join(normalized)
+
+
+def _concept_key(tokens: Sequence[str]) -> str:
+    return " ".join(_singular_concept_token(token) for token in tokens)
+
+
+def _concept_runs(text: str) -> list[list[str]]:
+    runs: list[list[str]] = []
+    for fragment in _CONCEPT_FRAGMENT_PATTERN.split(text):
+        current: list[str] = []
+        for token in _CONCEPT_TOKEN_PATTERN.findall(fragment):
+            if token.casefold() in _CONCEPT_STOPWORDS:
+                if current:
+                    runs.append(current)
+                    current = []
+                continue
+            current.append(token)
+        if current:
+            runs.append(current)
+    return runs
+
+
+def extract_concept_candidates(papers: Sequence[Paper]) -> list[str]:
+    """Extract deterministic 1-3 word concept phrases from current result papers."""
+    candidates: dict[str, tuple[str, int, int]] = {}
+    for paper in papers:
+        sources = ((paper.title, 4), (paper.abstract or "", 1))
+        for text, source_weight in sources:
+            for run in _concept_runs(text):
+                for width in (3, 2, 1):
+                    for start in range(len(run) - width + 1):
+                        tokens = run[start : start + width]
+                        lowered = [token.casefold() for token in tokens]
+                        if width == 1 and (
+                            lowered[0] in _GENERIC_CONCEPT_TERMS or len(lowered[0]) < 4
+                        ):
+                            continue
+                        if (
+                            lowered[0] in _GENERIC_CONCEPT_TERMS
+                            or lowered[-1] in _GENERIC_CONCEPT_TERMS
+                        ):
+                            continue
+                        if all(token in _GENERIC_CONCEPT_TERMS for token in lowered):
+                            continue
+                        key = _concept_key(tokens)
+                        if not key:
+                            continue
+                        display = " ".join(tokens)
+                        if len(display) > 120:
+                            continue
+                        previous = candidates.get(key)
+                        if previous is None:
+                            candidates[key] = (display, source_weight, 1)
+                        else:
+                            previous_display, previous_weight, count = previous
+                            candidates[key] = (
+                                previous_display,
+                                max(previous_weight, source_weight),
+                                count + 1,
+                            )
+
+    ordered = sorted(
+        candidates.items(),
+        key=lambda item: (
+            -item[1][1],
+            -item[1][2],
+            -len(item[0].split()),
+            item[0],
+        ),
+    )
+    return [details[0] for _, details in ordered[:MAX_CONCEPT_CANDIDATES]]
 
 
 def _meaningful_title_tokens(value: str) -> list[str]:
@@ -364,10 +534,58 @@ class GraphSemanticsService:
                     node_weight=relevance,
                     node_radius=relevance_to_radius(relevance),
                     information_completeness=completeness,
-                    node_opacity=completeness,
+                    node_opacity=relevance_to_opacity(completeness),
                 )
             )
         return seeds
+
+    def related_concepts(
+        self,
+        original_query: str,
+        papers: list[Paper],
+        *,
+        limit: int = MAX_RELATED_CONCEPTS,
+    ) -> list[RelatedConcept]:
+        """Rank result-set phrases against the original query in one encoder call."""
+        query = original_query.strip()
+        if not query:
+            raise GraphSemanticsInputError("Original query must not be empty")
+        if limit < 1:
+            return []
+        candidates = extract_concept_candidates(papers)
+        if not candidates:
+            return []
+        encoder = self._load_model()
+        inputs = [query, *candidates]
+        try:
+            embeddings = np.asarray(
+                encoder.encode(
+                    inputs,
+                    normalize_embeddings=True,
+                    convert_to_numpy=True,
+                    batch_size=64,
+                ),
+                dtype=float,
+            )
+            if embeddings.ndim != 2 or embeddings.shape[0] != len(inputs):
+                raise ValueError("unexpected embedding shape")
+            similarities = embeddings[1:] @ embeddings[0]
+        except Exception as exc:
+            raise GraphSemanticsUnavailableError(
+                "The local embedding model failed while ranking related concepts"
+            ) from exc
+
+        ranked = sorted(
+            (
+                RelatedConcept(
+                    text=text,
+                    query_similarity=_canonical_relevance(similarity),
+                )
+                for text, similarity in zip(candidates, similarities.tolist(), strict=True)
+            ),
+            key=lambda concept: (-concept.query_similarity, concept.text.casefold()),
+        )
+        return ranked[: min(limit, MAX_RELATED_CONCEPTS)]
 
     def paper_similarity_matrix(self, papers: list[Paper]) -> np.ndarray:
         """Encode papers in one batch and return their symmetric cosine matrix."""
@@ -422,10 +640,12 @@ class GraphSemanticsService:
             insight_paper_ids=insight_paper_ids,
         )
         edges = self.build_edge_seeds(papers)
+        related_concepts = self.related_concepts(original_query, papers)
         return GraphSeed(
             embedding_model=self.embedding_model_name,
             nodes=nodes,
             edges=edges,
+            related_concepts=related_concepts,
         )
 
 
@@ -434,9 +654,12 @@ __all__ = [
     "GRAPH_SEMANTICS_VERSION",
     "INSIGHTS_COMPLETENESS",
     "K_NEIGHBORS",
+    "MAX_CONCEPT_CANDIDATES",
+    "MAX_RELATED_CONCEPTS",
     "MAX_RADIUS",
     "METADATA_COMPLETENESS",
     "MIN_EDGE_SIMILARITY",
+    "MIN_NODE_OPACITY",
     "MIN_RADIUS",
     "PARSED_PDF_COMPLETENESS",
     "STRONG_TITLE_COVERAGE_FLOOR",
@@ -446,8 +669,11 @@ __all__ = [
     "GraphSemanticsInputError",
     "GraphSemanticsService",
     "GraphSemanticsUnavailableError",
+    "RelatedConcept",
+    "extract_concept_candidates",
     "format_graph_seed_audit",
     "information_completeness",
     "relevance_to_radius",
+    "relevance_to_opacity",
     "select_sparse_edges",
 ]

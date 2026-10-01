@@ -38,10 +38,14 @@ class Settings(BaseSettings):
     ranking_fusion_mode: Literal["reranker", "rrf"]
     provider_timeout_seconds: float = Field(default=20.0, ge=1, le=120)
     provider_retries: int = Field(default=2, ge=0, le=5)
+    search_deadline_seconds: float = Field(default=35.0, ge=1, le=180)
+    provider_failure_threshold: int = Field(default=2, ge=1, le=10)
+    provider_circuit_cooldown_seconds: float = Field(default=60.0, ge=1, le=3600)
     cors_origins: str = "http://localhost:5173"
     unpaywall_email: str | None = None
     pdf_max_size_mb: int = Field(default=50, ge=1, le=200)
     pdf_download_timeout_seconds: float = Field(default=30.0, ge=1, le=120)
+    pdf_acquisition_deadline_seconds: float = Field(default=180.0, ge=10, le=900)
     pdf_allowed_hosts: str = (
         "arxiv.org,biorxiv.org,core.ac.uk,europepmc.org,hal.science,medrxiv.org,"
         "ncbi.nlm.nih.gov,openreview.net,osf.io,semanticscholar.org,zenodo.org"

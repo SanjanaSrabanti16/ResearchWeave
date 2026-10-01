@@ -31,6 +31,21 @@ class PaperContextPacket:
         return sum(len(excerpt.quote) for excerpt in self.excerpts)
 
 
+@dataclass(frozen=True)
+class ResearchContextPart:
+    """A complete, ordered paper context or a semantic section-note packet."""
+
+    part_id: str
+    purpose: str
+    text: str
+    chunk_ids: tuple[str, ...]
+    strategy: ContextStrategy
+
+    @property
+    def character_count(self) -> int:
+        return len(self.text)
+
+
 _EXCLUDED_HEADING = re.compile(r"\b(?:references|bibliography|acknowledg(?:e)?ments?)\b", re.I)
 _METADATA_MARKER = re.compile(
     r"\b(?:corresponding author|e-?mail|department of|research institute|state key laboratory)\b|"
@@ -262,3 +277,157 @@ def build_paper_context_packets(
         return [packet] if packet.excerpts else []
     packet_chars = min(batch_chars, capabilities.max_context_chars // 2)
     return _hierarchical_packets(document, packet_chars)
+
+
+def _render_records(
+    document: ParsedPaper,
+    records: list[tuple[str, str, str, str, str | None]],
+) -> str:
+    lines = [
+        f"# {document.title or 'Untitled paper'}",
+        f"Authors: {', '.join(document.authors) or 'Unavailable'}",
+    ]
+    active_section: tuple[str, str] | None = None
+    for chunk_id, section_id, heading, text, rhetorical_role in records:
+        section = (section_id, heading)
+        if section != active_section:
+            lines.append(f"\n## {heading} [section={section_id}]")
+            active_section = section
+        role = f" [role={rhetorical_role}]" if rhetorical_role else ""
+        lines.append(f"[chunk:{chunk_id}]{role}\n{text.strip()}")
+    return "\n".join(lines).strip()
+
+
+def full_research_context(document: ParsedPaper) -> ResearchContextPart:
+    """Render all useful parsed-paper text in reading order, excluding bibliography noise."""
+    records = _paper_records(document)
+    return ResearchContextPart(
+        part_id="full-document",
+        purpose="complete useful parsed paper",
+        text=_render_records(document, records),
+        chunk_ids=tuple(record[0] for record in records),
+        strategy="full_document",
+    )
+
+
+def select_research_context_strategy(
+    document: ParsedPaper,
+    capabilities: LLMProviderCapabilities,
+    *,
+    prompt_reserve_chars: int = 12000,
+    output_reserve_chars: int = 28000,
+) -> ContextStrategy:
+    """Choose full-document only when the complete prompt has conservative headroom."""
+    context = full_research_context(document)
+    safe_capacity = int(capabilities.max_context_chars * 0.85)
+    fits = context.character_count + prompt_reserve_chars + output_reserve_chars <= safe_capacity
+    if fits and (
+        capabilities.context_strategy == "full_document" or capabilities.max_context_chars >= 100000
+    ):
+        return "full_document"
+    return "hierarchical_sections"
+
+
+def _split_oversized_section(
+    records: list[tuple[str, str, str, str, str | None]],
+    limit: int,
+) -> list[list[tuple[str, str, str, str, str | None]]]:
+    """Split only an individually oversized section, retaining one-chunk overlap."""
+    groups: list[list[tuple[str, str, str, str, str | None]]] = []
+    pending: list[tuple[str, str, str, str, str | None]] = []
+    pending_chars = 0
+    for record in records:
+        cost = len(record[3]) + len(record[2]) + 64
+        if pending and pending_chars + cost > limit:
+            groups.append(pending)
+            pending = [pending[-1]]
+            pending_chars = len(pending[-1][3]) + len(pending[-1][2]) + 64
+        pending.append(record)
+        pending_chars += cost
+    if pending:
+        groups.append(pending)
+    return groups
+
+
+def hierarchical_research_contexts(
+    document: ParsedPaper,
+    max_part_chars: int,
+) -> list[ResearchContextPart]:
+    """Build semantic note packets without reducing normal sections to top-k excerpts."""
+    records = _paper_records(document)
+    by_section: list[list[tuple[str, str, str, str, str | None]]] = []
+    for record in records:
+        if not by_section or by_section[-1][0][1] != record[1]:
+            by_section.append([record])
+        else:
+            by_section[-1].append(record)
+
+    phase_sections: dict[str, list[list[tuple[str, str, str, str, str | None]]]] = {
+        phase: [] for phase in _HIERARCHICAL_PHASES
+    }
+    for section_records in by_section:
+        phase_sections[_hierarchical_phase(section_records[0][2])].append(section_records)
+
+    parts: list[ResearchContextPart] = []
+    for phase in _HIERARCHICAL_PHASES:
+        pending: list[tuple[str, str, str, str, str | None]] = []
+        pending_chars = 0
+        for section_records in phase_sections[phase]:
+            section_chars = sum(len(record[3]) + len(record[2]) + 64 for record in section_records)
+            if section_chars > max_part_chars:
+                if pending:
+                    rendered = _render_records(document, pending)
+                    part_id = f"section-notes-{len(parts) + 1}"
+                    parts.append(
+                        ResearchContextPart(
+                            part_id=part_id,
+                            purpose=phase,
+                            text=rendered,
+                            chunk_ids=tuple(record[0] for record in pending),
+                            strategy="hierarchical_sections",
+                        )
+                    )
+                    pending = []
+                    pending_chars = 0
+                for split_records in _split_oversized_section(section_records, max_part_chars):
+                    rendered = _render_records(document, split_records)
+                    part_id = f"section-notes-{len(parts) + 1}"
+                    parts.append(
+                        ResearchContextPart(
+                            part_id=part_id,
+                            purpose=phase,
+                            text=rendered,
+                            chunk_ids=tuple(record[0] for record in split_records),
+                            strategy="hierarchical_sections",
+                        )
+                    )
+                continue
+            if pending and pending_chars + section_chars > max_part_chars:
+                rendered = _render_records(document, pending)
+                part_id = f"section-notes-{len(parts) + 1}"
+                parts.append(
+                    ResearchContextPart(
+                        part_id=part_id,
+                        purpose=phase,
+                        text=rendered,
+                        chunk_ids=tuple(record[0] for record in pending),
+                        strategy="hierarchical_sections",
+                    )
+                )
+                pending = []
+                pending_chars = 0
+            pending.extend(section_records)
+            pending_chars += section_chars
+        if pending:
+            rendered = _render_records(document, pending)
+            part_id = f"section-notes-{len(parts) + 1}"
+            parts.append(
+                ResearchContextPart(
+                    part_id=part_id,
+                    purpose=phase,
+                    text=rendered,
+                    chunk_ids=tuple(record[0] for record in pending),
+                    strategy="hierarchical_sections",
+                )
+            )
+    return parts

@@ -18,6 +18,13 @@ ARXIV_IDENTIFIER = re.compile(r"(?:\d{4}\.\d{4,5}|[a-z-]+(?:\.[a-z-]+)?/\d{7})",
 ARXIV_DOI_PREFIX = "10.48550/arxiv."
 
 
+def normalize_pmcid(value: Any) -> str | None:
+    if not value:
+        return None
+    match = re.search(r"\bPMC\s*([0-9]+)\b", str(value), re.I)
+    return f"PMC{match.group(1)}" if match else None
+
+
 class _MetadataTextParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)

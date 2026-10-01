@@ -87,7 +87,7 @@ async def test_partial_provider_failure_and_year_filtering() -> None:
     assert response.provider_status["good"].status == "ok"
     assert response.provider_status["good"].successful_requests == 2
     assert response.provider_status["bad"].status == "unavailable"
-    assert response.provider_status["bad"].failed_requests == 1
+    assert response.provider_status["bad"].failed_requests == 2
     assert response.warnings == []
     assert [paper.title for paper in response.papers] == ["In range"]
 
@@ -186,9 +186,9 @@ async def test_variant_results_are_unioned_then_canonically_deduplicated() -> No
     review = PaperCandidate(title="New paper", publication_year=2025, source_names=["first"])
     first = RecordingProvider(
         "first",
-        {"AI agents for visualizations": [shared_a], "AI visualization": [review]},
+        {"AI agents for visualizations": [shared_a], "AI agent visualization": [review]},
     )
-    second = RecordingProvider("second", {"AI agent visualization": [shared_b]})
+    second = RecordingProvider("second", {"AI agents for visualizations": [shared_b]})
     service = SearchService([first, second], MemoryCache(), DeduplicationService(), StubRanker())
 
     response = await service.search(
@@ -200,7 +200,8 @@ async def test_variant_results_are_unioned_then_canonically_deduplicated() -> No
     assert {paper.title for paper in response.papers} == {"Shared paper", "New paper"}
     shared = next(p for p in response.papers if p.title == "Shared paper")
     assert shared.source_names == ["first", "second"]
-    assert len(first.calls) == len(second.calls) == 4
+    assert len(first.calls) == 3
+    assert len(second.calls) == 2
     assert first.calls[0][1] == 100
     assert all(limit == 40 for _, limit in first.calls[1:])
 
@@ -221,13 +222,13 @@ async def test_each_variant_uses_normal_provider_cache_key() -> None:
     assert first.provider_status["openalex"].status == "ok"
     assert first.provider_status["openalex"].cached_requests == 0
     assert second.provider_status["openalex"].status == "ok"
-    assert second.provider_status["openalex"].cached_requests == 4
-    assert len(provider.calls) == 4
-    assert len(cache.entries) == 4
+    assert second.provider_status["openalex"].cached_requests == 2
+    assert len(provider.calls) == 2
+    assert len(cache.entries) == 2
 
 
 @pytest.mark.asyncio
-async def test_failed_provider_stops_after_first_variant_and_other_provider_completes() -> None:
+async def test_failed_provider_variants_do_not_block_other_provider() -> None:
     failing = StubProvider("slow_or_unavailable", fail=True)
     available = RecordingProvider(
         "available",
@@ -251,7 +252,7 @@ async def test_failed_provider_stops_after_first_variant_and_other_provider_comp
     assert response.provider_status["available"].status == "ok"
     assert response.warnings == []
     assert [paper.title for paper in response.papers] == ["Available result"]
-    assert len(available.calls) == 4
+    assert len(available.calls) == 2
 
 
 @pytest.mark.parametrize(
@@ -292,12 +293,43 @@ class CountingFailureProvider(StubProvider):
 
 
 @pytest.mark.asyncio
-async def test_unavailable_provider_is_not_retried_for_later_query_variants() -> None:
+async def test_every_failed_variant_is_reported_as_unavailable() -> None:
     provider = CountingFailureProvider("arxiv")
     service = SearchService([provider], MemoryCache(), DeduplicationService(), StubRanker())
 
     with pytest.raises(AllProvidersFailedError):
         await service.search(SearchRequest(query="AI agents for visualizations"))
+
+    assert provider.calls == 4
+
+
+class FirstVariantFailureProvider(StubProvider):
+    def __init__(self) -> None:
+        super().__init__("arxiv")
+        self.calls = 0
+
+    async def search(self, *_: Any) -> list[PaperCandidate]:
+        self.calls += 1
+        if self.calls == 1:
+            raise ProviderError("arxiv temporarily unavailable", category="rate_limited")
+        return [
+            PaperCandidate(
+                title=f"Recovered result {self.calls}",
+                publication_year=2025,
+                source_names=["arxiv"],
+            )
+        ]
+
+
+@pytest.mark.asyncio
+async def test_first_transient_failure_stops_remaining_variants() -> None:
+    provider = FirstVariantFailureProvider()
+    service = SearchService([provider], MemoryCache(), DeduplicationService(), StubRanker())
+
+    with pytest.raises(AllProvidersFailedError):
+        await service.search(
+            SearchRequest(query="AI agents for visualizations", start_year=2025, end_year=2026)
+        )
 
     assert provider.calls == 1
 

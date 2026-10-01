@@ -7,6 +7,13 @@ from typing import Literal
 from pydantic import BaseModel
 
 ContextStrategy = Literal["full_document", "hierarchical_sections"]
+LLMProviderAvailability = Literal[
+    "configured",
+    "unconfigured",
+    "available",
+    "temporarily_unavailable",
+    "authentication_error",
+]
 
 
 @dataclass(frozen=True)
@@ -74,6 +81,17 @@ class LLMProvider(ABC):
     @abstractmethod
     def configured(self) -> bool: ...
 
+    @property
+    def availability(self) -> LLMProviderAvailability:
+        """Return a safe runtime state without performing a network request."""
+        return "configured" if self.configured else "unconfigured"
+
+    @property
+    def availability_message(self) -> str:
+        if not self.configured:
+            return "Not configured"
+        return "Configured; availability has not been checked yet"
+
     @abstractmethod
     async def generate_structured(
         self,
@@ -84,6 +102,20 @@ class LLMProvider(ABC):
         max_output_tokens: int,
         context: LLMRequestContext | None = None,
     ) -> str: ...
+
+    async def generate_text(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        max_output_tokens: int,
+        context: LLMRequestContext | None = None,
+    ) -> str:
+        """Generate provider-native text; production adapters override this method."""
+        del system_prompt, user_prompt, max_output_tokens, context
+        raise LLMProviderUnavailableError(
+            f"{self.provider_id} does not support provider-agnostic text generation"
+        )
 
     async def aclose(self) -> None:
         return None

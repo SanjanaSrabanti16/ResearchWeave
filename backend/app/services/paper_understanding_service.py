@@ -31,7 +31,24 @@ from app.models.insights import (
     ValidatedEvidenceLedger,
 )
 from app.services.insight_cache import InsightCache
-from app.services.insight_context import PaperContextPacket, build_paper_context_packets
+from app.services.insight_context import (
+    PaperContextPacket,
+    build_paper_context_packets,
+    full_research_context,
+    hierarchical_research_contexts,
+    select_research_context_strategy,
+)
+from app.services.insight_markdown import (
+    SHARED_RESEARCH_SYSTEM_PROMPT,
+    notes_synthesis_prompt,
+    parse_research_markdown,
+    raw_to_final_diagnostic,
+    recovery_prompt,
+    section_note_prompt,
+    suspiciously_incomplete,
+    synthesis_prompt,
+    validate_markdown_insights,
+)
 from app.services.insight_selector import explicit_contribution_chunk_ids
 from app.services.insight_service import (
     InsightInputError,
@@ -46,7 +63,7 @@ from app.services.insight_service import (
     validate_insights,
 )
 
-PIPELINE_VERSION = "m2-final-v7-closeout"
+PIPELINE_VERSION = "m2-final-v8-provider-markdown"
 
 _CATEGORY_FIELD: dict[EvidenceCategory, str] = {
     "problem": "research_problem",
@@ -271,6 +288,8 @@ class PaperUnderstandingDiagnostics:
     synthesis_coverage_losses: list[str] = field(default_factory=list)
     restored_explicit_contributions: int = 0
     restored_open_challenges: int = 0
+    markdown_diagnostic: dict[str, Any] = field(default_factory=dict)
+    completeness_recovery_used: bool = False
 
 
 _EVIDENCE_SYSTEM_PROMPT = (
@@ -947,6 +966,176 @@ class PaperUnderstandingService:
         self.cache = cache
         self.batch_chars = batch_chars
 
+    @staticmethod
+    def _uses_markdown_contract(provider: LLMProvider) -> bool:
+        return type(provider).generate_text is not LLMProvider.generate_text
+
+    async def _extract_markdown(
+        self,
+        *,
+        document: ParsedPaper,
+        provider: LLMProvider,
+        fingerprint: str,
+        key: str,
+        run_id: str,
+        started: float,
+        diagnostics: PaperUnderstandingDiagnostics,
+        on_progress: Callable[[str], Awaitable[None]] | None,
+    ) -> InsightsResponse:
+        strategy = select_research_context_strategy(document, provider.capabilities)
+        diagnostics.context_strategy = strategy
+        recovery_used = False
+
+        async def generate(
+            prompt: str,
+            *,
+            stage: Literal["evidence_extraction", "synthesis"],
+            max_tokens: int,
+            pass_id: str,
+        ) -> str:
+            nonlocal recovery_used
+            try:
+                result = await provider.generate_text(
+                    system_prompt=SHARED_RESEARCH_SYSTEM_PROMPT,
+                    user_prompt=prompt,
+                    max_output_tokens=max_tokens,
+                    context=LLMRequestContext(
+                        stage=stage,
+                        paper_id=document.paper_id,
+                        paper_title=document.title or "Untitled paper",
+                        run_id=run_id,
+                        extraction_pass=pass_id,
+                    ),
+                )
+                diagnostics.model_calls += provider.last_generation_call_count
+                return result
+            except LLMOutputBudgetExceeded:
+                diagnostics.model_calls += provider.last_generation_call_count
+                if recovery_used:
+                    raise
+                recovery_used = True
+                diagnostics.completeness_recovery_used = True
+                result = await provider.generate_text(
+                    system_prompt=SHARED_RESEARCH_SYSTEM_PROMPT,
+                    user_prompt=recovery_prompt(prompt, "output_budget_exceeded"),
+                    max_output_tokens=max_tokens,
+                    context=LLMRequestContext(
+                        stage=stage,
+                        paper_id=document.paper_id,
+                        paper_title=document.title or "Untitled paper",
+                        run_id=run_id,
+                        extraction_pass=f"{pass_id}-bounded-recovery",
+                    ),
+                )
+                diagnostics.model_calls += provider.last_generation_call_count
+                return result
+
+        if on_progress:
+            await on_progress("Reading the complete paper")
+        extraction_started = time.perf_counter()
+        if strategy == "full_document":
+            context = full_research_context(document)
+            if not context.chunk_ids:
+                raise InsightInputError("Parsed paper has no useful research content")
+            diagnostics.packet_evidence_counts = [len(context.chunk_ids)]
+            raw = await generate(
+                synthesis_prompt(context.text),
+                stage="synthesis",
+                max_tokens=7000,
+                pass_id="full-document-synthesis",
+            )
+            recovery_source = context.text
+        else:
+            max_part_chars = max(
+                4000, min(self.batch_chars, provider.capabilities.max_context_chars // 2)
+            )
+            parts = hierarchical_research_contexts(document, max_part_chars)
+            if not parts:
+                raise InsightInputError("Parsed paper has no useful research content")
+            diagnostics.packet_evidence_counts = [len(part.chunk_ids) for part in parts]
+            notes: list[str] = []
+            for index, part in enumerate(parts, start=1):
+                if on_progress:
+                    await on_progress(f"Reading semantic paper section {index}/{len(parts)}")
+                notes.append(
+                    await generate(
+                        section_note_prompt(part.purpose, part.text),
+                        stage="evidence_extraction",
+                        max_tokens=2400,
+                        pass_id=part.part_id,
+                    )
+                )
+            if on_progress:
+                await on_progress("Synthesizing the complete research story")
+            final_prompt = notes_synthesis_prompt(document, notes)
+            raw = await generate(
+                final_prompt,
+                stage="synthesis",
+                max_tokens=7000,
+                pass_id="hierarchical-final-synthesis",
+            )
+            recovery_source = final_prompt
+        diagnostics.evidence_extraction_seconds = time.perf_counter() - extraction_started
+
+        synthesis_started = time.perf_counter()
+        try:
+            insights = parse_research_markdown(raw, document)
+            incomplete = suspiciously_incomplete(insights, document)
+        except InsightOutputError:
+            incomplete = True
+            insights = InsightFields.empty()
+        if incomplete and not recovery_used:
+            recovery_used = True
+            diagnostics.completeness_recovery_used = True
+            if on_progress:
+                await on_progress("Recovering missing research sections")
+            raw = await provider.generate_text(
+                system_prompt=SHARED_RESEARCH_SYSTEM_PROMPT,
+                user_prompt=recovery_prompt(recovery_source, "missing core research sections"),
+                max_output_tokens=7000,
+                context=LLMRequestContext(
+                    stage="synthesis",
+                    paper_id=document.paper_id,
+                    paper_title=document.title or "Untitled paper",
+                    run_id=run_id,
+                    extraction_pass="completeness-recovery",
+                ),
+            )
+            diagnostics.model_calls += provider.last_generation_call_count
+            insights = parse_research_markdown(raw, document)
+            incomplete = suspiciously_incomplete(insights, document)
+        if incomplete:
+            raise InsightOutputError(
+                f"{provider.provider_id} omitted core Methods, Contributions, and Findings content"
+            )
+        insights = validate_markdown_insights(insights, document)
+        diagnostics.markdown_diagnostic = raw_to_final_diagnostic(raw, insights)
+        diagnostics.final_counts = {
+            field: len(getattr(insights, field)) for field in INSIGHT_FIELDS
+        }
+        diagnostics.synthesis_seconds = time.perf_counter() - synthesis_started
+        diagnostics.total_seconds = time.perf_counter() - started
+        if on_progress:
+            await on_progress("Saving research explanation")
+        await asyncio.to_thread(self.cache.put, key, insights)
+        await asyncio.to_thread(
+            self.cache.put_current,
+            paper_id=document.paper_id,
+            document_fingerprint=fingerprint,
+            provider_id=provider.provider_id,
+            model=provider.model_id,
+            extraction_version=PIPELINE_VERSION,
+            insights=insights,
+        )
+        return InsightsResponse(
+            paper_id=document.paper_id,
+            document_fingerprint=fingerprint,
+            model=provider.model_id,
+            extraction_version=PIPELINE_VERSION,
+            cached=False,
+            insights=insights,
+        )
+
     async def extract(
         self,
         document: ParsedPaper,
@@ -959,6 +1148,7 @@ class PaperUnderstandingService:
         diagnostics = diagnostics or PaperUnderstandingDiagnostics()
         evidence_chunks(document)
         provider = self.registry.get(provider_id)
+        uses_markdown = self._uses_markdown_contract(provider)
         fingerprint = document_fingerprint(document)
         key = self.cache.key(fingerprint, provider.model_id, PIPELINE_VERSION, provider.provider_id)
         if diagnostics is not None:
@@ -966,7 +1156,8 @@ class PaperUnderstandingService:
             diagnostics.model_id = provider.model_id
             diagnostics.context_strategy = provider.capabilities.context_strategy
         cached = await asyncio.to_thread(self.cache.get, key)
-        if cached is not None and validate_insights(cached, document) == cached:
+        cache_validator = validate_markdown_insights if uses_markdown else validate_insights
+        if cached is not None and cache_validator(cached, document) == cached:
             await asyncio.to_thread(
                 self.cache.put_current,
                 paper_id=document.paper_id,
@@ -988,6 +1179,17 @@ class PaperUnderstandingService:
                 extraction_version=PIPELINE_VERSION,
                 cached=True,
                 insights=cached,
+            )
+        if uses_markdown:
+            return await self._extract_markdown(
+                document=document,
+                provider=provider,
+                fingerprint=fingerprint,
+                key=key,
+                run_id=run_id,
+                started=started,
+                diagnostics=diagnostics,
+                on_progress=on_progress,
             )
         if on_progress:
             await on_progress("Selecting evidence")

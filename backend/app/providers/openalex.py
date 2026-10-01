@@ -119,9 +119,13 @@ class OpenAlexProvider(SearchProvider):
         try:
             results = response.json().get("results", [])
         except (ValueError, AttributeError) as exc:
-            raise ProviderError("openalex returned an invalid response") from exc
+            raise ProviderError(
+                "openalex returned an invalid response", category="parsing_error"
+            ) from exc
         if not isinstance(results, list):
-            raise ProviderError("openalex returned an invalid result set")
+            raise ProviderError(
+                "openalex returned an invalid result set", category="invalid_response"
+            )
         papers = [
             paper for item in results if isinstance(item, dict) if (paper := self.normalize(item))
         ]

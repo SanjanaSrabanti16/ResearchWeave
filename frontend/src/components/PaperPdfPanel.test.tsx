@@ -226,7 +226,7 @@ describe("PaperPdfPanel", () => {
     await user.click(screen.getByText("Evidence (1)"));
     expect(screen.getByText("“Section evidence.”")).toBeInTheDocument();
     expect(screen.getByText("chunk-1")).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: "Google Gemini (unavailable)" })).toBeDisabled();
+    expect(screen.getByRole("option", { name: "Google Gemini (not configured)" })).toBeDisabled();
     expect(extractPaperInsights).toHaveBeenCalledWith(document, expect.any(Function), "ollama");
   });
 
@@ -303,7 +303,7 @@ describe("PaperPdfPanel", () => {
     expect(extractPaperInsights).toHaveBeenCalledWith(document, expect.any(Function), "gemini");
   });
 
-  it("shows unavailable EVL Gemma as disabled", async () => {
+  it("shows unconfigured EVL Gemma as disabled", async () => {
     vi.mocked(acquireAndParsePDF).mockResolvedValue({
       status: "arxiv",
       paper_id: "paper-1",
@@ -316,8 +316,61 @@ describe("PaperPdfPanel", () => {
     await user.click(screen.getByRole("button", { name: "Get PDF" }));
 
     expect(
-      await screen.findByRole("option", { name: "EVL Gemma (unavailable)" }),
+      await screen.findByRole("option", { name: "EVL Gemma (not configured)" }),
     ).toBeDisabled();
+  });
+
+  it("shows temporary EVL outage without affecting Local Ollama selection", async () => {
+    vi.mocked(acquireAndParsePDF).mockResolvedValue({
+      status: "arxiv",
+      paper_id: "paper-1",
+      document,
+      message: "Parsed successfully.",
+    });
+    vi.mocked(getLLMProviders).mockResolvedValue({
+      default_provider: "ollama",
+      providers: [
+        {
+          provider_id: "ollama",
+          model: "qwen3:1.7b",
+          configured: true,
+          cloud: false,
+          availability: "available",
+          message: "Available",
+        },
+        {
+          provider_id: "gemini",
+          model: "gemini-3.5-flash",
+          configured: false,
+          cloud: true,
+          availability: "unconfigured",
+          message: "Not configured",
+        },
+        {
+          provider_id: "evl_gemma",
+          model: "gemma4",
+          configured: true,
+          cloud: true,
+          availability: "temporarily_unavailable",
+          message: "Temporarily unavailable",
+        },
+      ],
+    });
+    const user = userEvent.setup();
+    render(<PaperPdfPanel paper={paper} />);
+
+    await user.click(screen.getByRole("button", { name: "Get PDF" }));
+    const selector = await screen.findByLabelText("Analysis provider");
+    expect(selector).toHaveValue("ollama");
+    expect(
+      screen.getByRole("option", { name: "EVL Gemma (temporarily unavailable)" }),
+    ).not.toBeDisabled();
+    expect(screen.queryByText("EVL Gemma: Temporarily unavailable")).not.toBeInTheDocument();
+
+    await user.selectOptions(selector, "evl_gemma");
+    expect(screen.getByText("EVL Gemma: Temporarily unavailable")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry EVL Gemma" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Use Local Ollama" })).toBeInTheDocument();
   });
 
   it("sends an explicitly selected configured EVL Gemma provider", async () => {

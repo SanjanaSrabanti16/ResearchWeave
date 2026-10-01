@@ -77,6 +77,7 @@ def test_successful_search_returns_expected_response_shape(tmp_path) -> None:
     assert response.status_code == 200
     assert response.json() == {
         "query": "visual agents",
+        "overall_status": "success",
         "candidate_count": 2,
         "deduplicated_count": 1,
         "ranked_count": 1,
@@ -92,6 +93,8 @@ def test_successful_search_returns_expected_response_shape(tmp_path) -> None:
                 "doi": None,
                 "arxiv_id": None,
                 "arxiv_ids": [],
+                "pmcid": None,
+                "pmcids": [],
                 "openalex_id": None,
                 "semantic_scholar_id": None,
                 "url": None,

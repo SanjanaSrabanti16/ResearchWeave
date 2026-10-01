@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -7,6 +7,9 @@ import {
   extractPaperInsights,
   getCachedPaperAnalysis,
   getLLMProviders,
+  getPaperRelationshipByPair,
+  getPaperRelationshipHistory,
+  proposePaperRelationship,
 } from "../api/client";
 import type {
   CachedPaperAnalysisResponse,
@@ -26,6 +29,10 @@ vi.mock("../api/client", async (importOriginal) => {
     extractPaperInsights: vi.fn(),
     getCachedPaperAnalysis: vi.fn(),
     getLLMProviders: vi.fn(),
+    getPaperRelationshipByPair: vi.fn(),
+    getPaperRelationshipHistory: vi.fn(),
+    proposePaperRelationship: vi.fn(),
+    reviewPaperRelationship: vi.fn(),
   };
 });
 
@@ -54,18 +61,39 @@ const papers: Paper[] = [
 ];
 
 const graph: GraphResponse = {
-  semantics_version: "m3.4-m3.6-v1",
+  semantics_version: "m3.4-m3.6-v4",
   embedding_model: "sentence-transformers/all-MiniLM-L6-v2",
   nodes: [
     { paper_id: "paper-a", title: "Agentic Networks", query_relevance: 0.9, node_weight: 0.9, node_radius: 26, information_completeness: 1, node_opacity: 1 },
-    { paper_id: "paper-b", title: "Secure Agents", query_relevance: 0.7, node_weight: 0.7, node_radius: 22, information_completeness: 0.78, node_opacity: 0.78 },
-    { paper_id: "paper-c", title: "Fern Morphology", query_relevance: 0.2, node_weight: 0.2, node_radius: 15, information_completeness: 0.4, node_opacity: 0.4 },
+    { paper_id: "paper-b", title: "Secure Agents", query_relevance: 0.7, node_weight: 0.7, node_radius: 22, information_completeness: 0.78, node_opacity: 0.846 },
+    { paper_id: "paper-c", title: "Fern Morphology", query_relevance: 0.2, node_weight: 0.2, node_radius: 15, information_completeness: 0.4, node_opacity: 0.58 },
   ],
   edges: [
     { source_paper_id: "paper-a", target_paper_id: "paper-b", paper_similarity: 0.8, edge_weight: 0.8, selection_reason: "both_top_k" },
     { source_paper_id: "paper-a", target_paper_id: "paper-c", paper_similarity: 0.6, edge_weight: 0.6, selection_reason: "source_top_k" },
     { source_paper_id: "paper-b", target_paper_id: "paper-c", paper_similarity: 0.5, edge_weight: 0.5, selection_reason: "target_top_k" },
   ],
+  related_concepts: [
+    { text: "Agentic networks", query_similarity: 0.91 },
+    { text: "Autonomous agents", query_similarity: 0.84 },
+  ],
+};
+
+const reorderedGraph: GraphResponse = {
+  ...graph,
+  nodes: graph.nodes.map((node) => ({
+    ...node,
+    query_relevance: {
+      "paper-a": 0.61,
+      "paper-b": 0.72,
+      "paper-c": 0.96,
+    }[node.paper_id]!,
+    node_opacity: {
+      "paper-a": 0.727,
+      "paper-b": 0.804,
+      "paper-c": 0.972,
+    }[node.paper_id]!,
+  })),
 };
 
 function parsedDocument(paperId: string, title: string): ParsedPaper {
@@ -120,22 +148,120 @@ beforeEach(() => {
       },
     },
   });
+  vi.mocked(getPaperRelationshipByPair).mockResolvedValue(null);
+  vi.mocked(getPaperRelationshipHistory).mockResolvedValue({
+    proposal_id: "unused",
+    proposal: {} as never,
+    reviews: [],
+  });
 });
 
 describe("GraphWorkspace", () => {
+  it("displays canonical query-relevance rank without changing M1 or graph semantics", async () => {
+    const originalPapers = structuredClone(papers);
+    const originalGraph = structuredClone(reorderedGraph);
+    const { container } = render(
+      <GraphWorkspace
+        papers={papers}
+        graph={reorderedGraph}
+        graphLoading={false}
+        graphError={null}
+      />,
+    );
+
+    await waitFor(() => expect(container.querySelectorAll(".graph-node")).toHaveLength(3));
+    const rows = Array.from(
+      container.querySelectorAll<HTMLElement>("[data-paper-row-id]"),
+    );
+    expect(rows.map((row) => row.dataset.paperRowId)).toEqual([
+      "paper-c",
+      "paper-b",
+      "paper-a",
+    ]);
+    expect(rows.map((row) => row.querySelector(".paper-row-rank")?.textContent)).toEqual([
+      "1",
+      "2",
+      "3",
+    ]);
+    expect(rows[0]).toHaveTextContent("Fern Morphology");
+    expect(container.querySelector('[data-paper-id="paper-c"]')).toHaveAttribute("r", "15");
+    expect(container.querySelector('[data-paper-id="paper-c"]')).toHaveAttribute(
+      "opacity",
+      "0.972",
+    );
+    expect(papers).toEqual(originalPapers);
+    expect(reorderedGraph).toEqual(originalGraph);
+    expect(papers.map(({ semantic_score }) => semantic_score)).toEqual([0.9, 0.7, 0.2]);
+  });
+
+  it("keeps ID-based graph, paper, relationship, and Back interactions after reorder", async () => {
+    const user = userEvent.setup();
+    const { container } = render(
+      <GraphWorkspace
+        papers={papers}
+        graph={reorderedGraph}
+        graphLoading={false}
+        graphError={null}
+      />,
+    );
+    await waitFor(() => expect(container.querySelectorAll(".graph-node")).toHaveLength(3));
+    const nodeC = container.querySelector<SVGCircleElement>('[data-paper-id="paper-c"]')!;
+    const rowC = container.querySelector<HTMLElement>('[data-paper-row-id="paper-c"]')!;
+    const edgeAB = container.querySelector<SVGLineElement>(
+      '[data-source-id="paper-a"][data-target-id="paper-b"]',
+    )!;
+    const rowA = container.querySelector<HTMLElement>('[data-paper-row-id="paper-a"]')!;
+    const rowB = container.querySelector<HTMLElement>('[data-paper-row-id="paper-b"]')!;
+
+    fireEvent.mouseEnter(nodeC);
+    expect(rowC).toHaveClass("is-active");
+    fireEvent.mouseLeave(nodeC);
+    fireEvent.mouseEnter(edgeAB);
+    expect(rowA).toHaveClass("is-active", "is-edge-endpoint");
+    expect(rowB).toHaveClass("is-active", "is-edge-endpoint");
+    fireEvent.mouseLeave(edgeAB);
+
+    await user.click(rowC);
+    expect(await screen.findByRole("complementary", { name: /details for fern morphology/i }))
+      .toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /back/i }));
+    expect(Array.from(container.querySelectorAll<HTMLElement>("[data-paper-row-id]"))
+      .map((row) => row.dataset.paperRowId)).toEqual(["paper-c", "paper-b", "paper-a"]);
+
+    fireEvent.click(edgeAB);
+    expect(await screen.findByRole("complementary", {
+      name: /relationship between agentic networks and secure agents/i,
+    })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /back/i }));
+    expect(Array.from(container.querySelectorAll<HTMLElement>("[data-paper-row-id]"))
+      .map((row) => row.dataset.paperRowId)).toEqual(["paper-c", "paper-b", "paper-a"]);
+  });
+
   it("renders backend node and edge semantics with the complete paper list", async () => {
     const { container } = render(
       <GraphWorkspace papers={papers} graph={graph} graphLoading={false} graphError={null} />,
     );
 
     await waitFor(() => expect(container.querySelectorAll(".graph-node")).toHaveLength(3));
+    const workspace = screen.getByRole("region", { name: "Research paper graph workspace" });
+    expect(workspace).toHaveAttribute("data-desktop-layout", "45-55");
+    expect(workspace.querySelector('[data-workspace-region="graph"]')).toBeInTheDocument();
+    expect(workspace.querySelector('[data-workspace-region="papers"]')).toBeInTheDocument();
     expect(container.querySelectorAll("[data-paper-row-id]")).toHaveLength(3);
     const firstNode = container.querySelector<SVGCircleElement>('[data-paper-id="paper-a"]')!;
     expect(firstNode).toHaveAttribute("r", "26");
     expect(firstNode).toHaveAttribute("opacity", "1");
+    expect(firstNode).toHaveAttribute("data-node-opacity", "1");
+    const completenessNode = container.querySelector<SVGCircleElement>(
+      '[data-paper-id="paper-b"]',
+    )!;
+    expect(completenessNode).toHaveAttribute("opacity", "0.846");
+    expect(completenessNode).toHaveAttribute("data-node-opacity", "0.846");
+    expect(completenessNode).not.toHaveAttribute("opacity", "0.7");
     expect(firstNode).toHaveAttribute("data-color-token", "rw-periwinkle");
     const edge = container.querySelector<SVGLineElement>(".graph-edge")!;
     expect(edge).toHaveAttribute("data-color-token", "rw-edge");
+    expect(edge).toHaveStyle({ cursor: "pointer" });
     expect(Number(edge.getAttribute("stroke-width"))).toBe(edgeWidth(0.8));
     expect(edge).toHaveAttribute("stroke-opacity", "1");
     expect(edgeWidth(0.92)).toBeGreaterThan(edgeWidth(0.8));
@@ -146,6 +272,29 @@ describe("GraphWorkspace", () => {
     const legendThick = container.querySelector<HTMLElement>(".edge-thick")!;
     expect(legendThin.style.height).toBe(`${edgeWidth(0.35)}px`);
     expect(legendThick.style.height).toBe(`${edgeWidth(1)}px`);
+    const sizeLegend = screen.getByTestId("node-size-legend");
+    const opacityLegend = screen.getByTestId("node-opacity-legend");
+    const edgeLegend = screen.getByTestId("edge-width-legend");
+    const legend = screen.getByLabelText("Graph legend");
+    expect(workspace.querySelector('[data-workspace-region="graph"]')).toContainElement(legend);
+    expect(workspace.querySelector('[data-workspace-region="papers"]')).not.toContainElement(legend);
+    expect(legend).not.toHaveTextContent("→");
+    expect(within(sizeLegend).getByText("Node size")).toBeInTheDocument();
+    expect(within(sizeLegend).getByText("Query similarity")).toBeInTheDocument();
+    expect(sizeLegend.querySelectorAll(".graph-legend-examples i")).toHaveLength(3);
+    expect(within(sizeLegend).getByText("Low")).toBeInTheDocument();
+    expect(within(sizeLegend).getByText("High")).toBeInTheDocument();
+    expect(within(opacityLegend).getByText("Node opacity")).toBeInTheDocument();
+    expect(within(opacityLegend).getByText("Information completeness")).toBeInTheDocument();
+    expect(opacityLegend.querySelectorAll(".graph-legend-examples i")).toHaveLength(3);
+    expect(within(opacityLegend).getByText("Low")).toBeInTheDocument();
+    expect(within(opacityLegend).getByText("High")).toBeInTheDocument();
+    expect(within(edgeLegend).getByText("Edge width")).toBeInTheDocument();
+    expect(within(edgeLegend).getByText("Paper similarity")).toBeInTheDocument();
+    expect(edgeLegend.querySelectorAll(".graph-legend-examples i")).toHaveLength(3);
+    expect(within(edgeLegend).getByText("Low")).toBeInTheDocument();
+    expect(within(edgeLegend).getByText("High")).toBeInTheDocument();
+    expect(screen.getByText(/Information completeness/i)).toBeInTheDocument();
   });
 
   it("keeps node hover semantics and links the corresponding paper row", async () => {
@@ -220,7 +369,7 @@ describe("GraphWorkspace", () => {
     expect(nodeA).toHaveAttribute("r", "26");
     expect(nodeA).toHaveAttribute("opacity", "1");
     expect(nodeB).toHaveAttribute("r", "22");
-    expect(nodeB).toHaveAttribute("opacity", "0.78");
+    expect(nodeB).toHaveAttribute("opacity", "0.846");
     expect(edgeAB).toHaveAttribute("stroke-width", originalWidth);
     expect(edgeAB).toHaveAttribute("stroke-opacity", "1");
     expect(graph).toEqual(originalGraph);
@@ -252,6 +401,96 @@ describe("GraphWorkspace", () => {
     fireEvent.mouseLeave(edgeAB);
     expect(nodeC).toHaveClass("is-selected");
     expect(nodeC).not.toHaveClass("is-muted");
+  });
+
+  it("opens relationship detail only on edge click and restores the unchanged list", async () => {
+    const user = userEvent.setup();
+    const { container } = render(
+      <GraphWorkspace papers={papers} graph={graph} graphLoading={false} graphError={null} />,
+    );
+    await waitFor(() => expect(container.querySelectorAll(".graph-edge")).toHaveLength(3));
+    const graphElement = screen.getByTestId("research-graph");
+    const edgeAB = container.querySelector<SVGLineElement>(
+      '[data-source-id="paper-a"][data-target-id="paper-b"]',
+    )!;
+
+    fireEvent.mouseEnter(edgeAB);
+    expect(getPaperRelationshipByPair).not.toHaveBeenCalled();
+    expect(proposePaperRelationship).not.toHaveBeenCalled();
+    fireEvent.mouseLeave(edgeAB);
+
+    fireEvent.click(edgeAB);
+    expect(await screen.findByRole("complementary", { name: /relationship between agentic networks and secure agents/i })).toBeInTheDocument();
+    expect(screen.getByText(/semantic similarity:/i)).toHaveTextContent("0.80");
+    expect(screen.getByTestId("research-graph")).toBe(graphElement);
+    expect(container.querySelectorAll("[data-paper-row-id]")).toHaveLength(0);
+    expect(proposePaperRelationship).not.toHaveBeenCalled();
+    expect(edgeAB).toHaveClass("is-selected-edge");
+
+    await user.click(screen.getByRole("button", { name: /back/i }));
+    expect(container.querySelectorAll("[data-paper-row-id]")).toHaveLength(3);
+    expect(screen.getByTestId("research-graph")).toBe(graphElement);
+    expect(proposePaperRelationship).not.toHaveBeenCalled();
+  });
+
+  it("keeps a selected edge while another edge is temporarily hovered", async () => {
+    const { container } = render(
+      <GraphWorkspace papers={papers} graph={graph} graphLoading={false} graphError={null} />,
+    );
+    await waitFor(() => expect(container.querySelectorAll(".graph-edge")).toHaveLength(3));
+    const edgeAB = container.querySelector<SVGLineElement>(
+      '[data-source-id="paper-a"][data-target-id="paper-b"]',
+    )!;
+    const edgeAC = container.querySelector<SVGLineElement>(
+      '[data-source-id="paper-a"][data-target-id="paper-c"]',
+    )!;
+    const nodeB = container.querySelector<SVGCircleElement>('[data-paper-id="paper-b"]')!;
+
+    fireEvent.click(edgeAB);
+    await screen.findByText(/Generate relationship analysis/i);
+    fireEvent.mouseEnter(edgeAC);
+    expect(edgeAB).toHaveClass("is-selected-edge");
+    expect(edgeAC).toHaveClass("is-hovered-edge");
+    expect(nodeB).toHaveClass("is-selected-edge-endpoint");
+    expect(nodeB).not.toHaveClass("is-muted");
+    fireEvent.mouseLeave(edgeAC);
+    expect(edgeAB).toHaveClass("is-selected-edge");
+    expect(edgeAC).not.toHaveClass("is-hovered-edge");
+  });
+
+  it("opens a relationship edge with the keyboard without changing graph semantics", async () => {
+    const { container } = render(
+      <GraphWorkspace papers={papers} graph={graph} graphLoading={false} graphError={null} />,
+    );
+    await waitFor(() => expect(container.querySelectorAll(".graph-edge")).toHaveLength(3));
+    const edgeAB = container.querySelector<SVGLineElement>(
+      '[data-source-id="paper-a"][data-target-id="paper-b"]',
+    )!;
+    const nodeA = container.querySelector<SVGCircleElement>('[data-paper-id="paper-a"]')!;
+    const originalWidth = edgeAB.getAttribute("stroke-width");
+
+    fireEvent.keyDown(edgeAB, { key: "Enter" });
+
+    expect(await screen.findByText(/Generate relationship analysis/i)).toBeInTheDocument();
+    expect(edgeAB).toHaveAttribute("role", "button");
+    expect(edgeAB).toHaveAttribute("tabindex", "0");
+    expect(edgeAB).toHaveAttribute("stroke-width", originalWidth);
+    expect(nodeA).toHaveAttribute("r", "26");
+    expect(nodeA).toHaveAttribute("opacity", "1");
+  });
+
+  it("keeps paper click behavior separate from relationship detail", async () => {
+    const { container } = render(
+      <GraphWorkspace papers={papers} graph={graph} graphLoading={false} graphError={null} />,
+    );
+    await waitFor(() => expect(container.querySelectorAll(".graph-edge")).toHaveLength(3));
+    fireEvent.click(container.querySelector('[data-source-id="paper-a"][data-target-id="paper-b"]')!);
+    await screen.findByText(/Generate relationship analysis/i);
+
+    fireEvent.click(container.querySelector('[data-paper-id="paper-c"]')!);
+
+    expect(await screen.findByRole("complementary", { name: /details for fern morphology/i })).toBeInTheDocument();
+    expect(screen.queryByText(/Generate relationship analysis/i)).not.toBeInTheDocument();
   });
 
   it("opens the same detail experience, preserves the graph, and restores the list", async () => {

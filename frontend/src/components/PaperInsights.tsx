@@ -72,7 +72,7 @@ export function PaperInsights({ insights }: { insights: InsightFields }) {
                   <p className={field === "paper_overview" ? "paper-overview-text" : "insight-claim-text"}>
                     {item.claim}
                   </p>
-                  <details className="insight-evidence">
+                  {item.evidence.length > 0 && <details className="insight-evidence">
                     <summary>Evidence ({item.evidence.length})</summary>
                     <ul>
                       {item.evidence.map((reference, evidenceIndex) => (
@@ -82,7 +82,7 @@ export function PaperInsights({ insights }: { insights: InsightFields }) {
                         </li>
                       ))}
                     </ul>
-                  </details>
+                  </details>}
                 </li>
               ))}
             </ul>
@@ -90,7 +90,11 @@ export function PaperInsights({ insights }: { insights: InsightFields }) {
             <p className="insight-empty-state">
               {field === "limitations"
                 ? "The paper does not explicitly state study limitations."
-                : "No grounded insight extracted."}
+                : field === "target_audience"
+                  ? "The paper does not explicitly specify a target audience."
+                  : field === "future_work"
+                    ? "No explicit future-work directions were identified."
+                    : "No grounded insight extracted."}
             </p>
           )}
         </article>

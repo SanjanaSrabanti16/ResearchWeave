@@ -72,7 +72,8 @@ async def test_semantic_scholar_retry_waits_at_least_one_second(monkeypatch) -> 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         await SemanticScholarProvider(client, retries=1).search("agents", 5)
     assert calls == 2
-    assert delays == [1.0]
+    assert len(delays) == 1
+    assert delays[0] >= 1.0
 
 
 @pytest.mark.asyncio

@@ -9,6 +9,8 @@ export interface Paper {
   doi: string | null;
   arxiv_id: string | null;
   arxiv_ids?: string[];
+  pmcid?: string | null;
+  pmcids?: string[];
   openalex_id: string | null;
   semantic_scholar_id: string | null;
   url: string | null;
@@ -38,6 +40,7 @@ export interface ProviderHealth {
 
 export interface SearchResponse {
   query: string;
+  overall_status: "success" | "no_results";
   candidate_count: number;
   deduplicated_count: number;
   ranked_count: number;
@@ -66,11 +69,17 @@ export interface GraphEdge {
   selection_reason: EdgeSelectionReason;
 }
 
+export interface RelatedConcept {
+  text: string;
+  query_similarity: number;
+}
+
 export interface GraphResponse {
   semantics_version: string;
   embedding_model: string;
   nodes: GraphNode[];
   edges: GraphEdge[];
+  related_concepts: RelatedConcept[];
 }
 
 export interface GraphPayload {
@@ -109,12 +118,23 @@ export interface ParsedPaper {
   parser: string;
   parser_version: string;
   source_pdf: {
-    acquisition_method: "existing_pdf" | "arxiv" | "unpaywall" | "upload";
+    acquisition_method:
+      | "existing_pdf"
+      | "arxiv"
+      | "unpaywall"
+      | "crossref"
+      | "pmc"
+      | "publisher"
+      | "upload";
     acquisition_provenance?:
       | "known_pdf_url"
       | "alternate_pdf_url"
       | "arxiv_id"
       | "unpaywall"
+      | "crossref"
+      | "pmc"
+      | "publisher_landing_page"
+      | "doi_landing_page"
       | "title_verified_arxiv_fallback"
       | "upload"
       | null;
@@ -125,7 +145,15 @@ export interface ParsedPaper {
 }
 
 export interface PDFProcessingResponse {
-  status: "existing_pdf" | "arxiv" | "unpaywall" | "upload" | "upload_required";
+  status:
+    | "existing_pdf"
+    | "arxiv"
+    | "unpaywall"
+    | "crossref"
+    | "pmc"
+    | "publisher"
+    | "upload"
+    | "upload_required";
   paper_id: string;
   document: ParsedPaper | null;
   message: string | null;
@@ -168,6 +196,13 @@ export interface LLMProviderStatus {
   model: string;
   configured: boolean;
   cloud: boolean;
+  availability?:
+    | "configured"
+    | "unconfigured"
+    | "available"
+    | "temporarily_unavailable"
+    | "authentication_error";
+  message?: string;
 }
 
 export interface LLMProviderStatusResponse {
@@ -189,4 +224,99 @@ export interface CachedPaperAnalysisResponse {
   document: ParsedPaper | null;
   insights: InsightsResponse | null;
   insight_provider: LLMProviderId | null;
+}
+
+export type RelationshipType =
+  | "shared_problem"
+  | "shared_method"
+  | "shared_finding"
+  | "complementary_contribution"
+  | "contrasting_result"
+  | "shared_limitation"
+  | "shared_future_work"
+  | "related_application"
+  | "other";
+
+export interface RelationshipProposalPayload {
+  source_paper_id: string;
+  target_paper_id: string;
+  requested_relationship_types?: RelationshipType[];
+}
+
+export interface RelationshipItem {
+  relationship_type: RelationshipType;
+  summary: string;
+  source_evidence_ids: string[];
+  target_evidence_ids: string[];
+  confidence: number;
+}
+
+export interface RelationshipEvidence {
+  paper_id: string;
+  evidence_id: string;
+  insight_field: string;
+  claim: string;
+  quote: string;
+  section_id: string | null;
+  section_heading: string | null;
+  page_start: number | null;
+  page_end: number | null;
+}
+
+export interface RelationshipProposal {
+  proposal_id: string;
+  source_paper_id: string;
+  target_paper_id: string;
+  semantic_similarity: number;
+  relationship_types: RelationshipType[];
+  relationships: RelationshipItem[];
+  summary: string;
+  evidence_source: RelationshipEvidence[];
+  evidence_target: RelationshipEvidence[];
+  confidence: number;
+  source_analysis: {
+    document_fingerprint: string;
+    provider: string;
+    model: string;
+    extraction_version: string;
+  };
+  target_analysis: {
+    document_fingerprint: string;
+    provider: string;
+    model: string;
+    extraction_version: string;
+  };
+  relationship_provider: string;
+  relationship_model: string;
+  relationship_pipeline_version: string;
+  created_at: string;
+  cached: boolean;
+  diagnostics: Array<{ item_index: number; reason: string }>;
+}
+
+export interface RelationshipReviewPayload {
+  decision: "accepted" | "rejected" | "edited";
+  edited_relationship_types?: RelationshipType[];
+  edited_summary?: string;
+  reviewer_note?: string;
+}
+
+export interface RelationshipReview {
+  review_id: string;
+  proposal_id: string;
+  review_version: number;
+  decision: "accepted" | "rejected" | "edited";
+  original_relationship_types: RelationshipType[];
+  original_summary: string;
+  relationship_pipeline_version: string;
+  edited_relationship_types: RelationshipType[] | null;
+  edited_summary: string | null;
+  reviewer_note: string | null;
+  created_at: string;
+}
+
+export interface RelationshipReviewHistory {
+  proposal_id: string;
+  proposal: RelationshipProposal;
+  reviews: RelationshipReview[];
 }

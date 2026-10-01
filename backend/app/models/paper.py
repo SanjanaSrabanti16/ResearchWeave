@@ -19,6 +19,8 @@ class Paper(BaseModel):
     doi: str | None = None
     arxiv_id: str | None = None
     arxiv_ids: list[str] = Field(default_factory=list)
+    pmcid: str | None = None
+    pmcids: list[str] = Field(default_factory=list)
     openalex_id: str | None = None
     semantic_scholar_id: str | None = None
     url: str | None = None
@@ -34,6 +36,7 @@ class Paper(BaseModel):
         "authors",
         "source_names",
         "arxiv_ids",
+        "pmcids",
         "alternate_urls",
         "alternate_pdf_urls",
         mode="before",

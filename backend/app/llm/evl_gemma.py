@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
+import random
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -14,6 +18,7 @@ from app.llm.base import (
     LLMOutputBudgetExceeded,
     LLMOutputError,
     LLMProvider,
+    LLMProviderAvailability,
     LLMProviderCapabilities,
     LLMProviderUnavailableError,
     LLMRateLimitError,
@@ -26,6 +31,9 @@ from app.llm.structured import (
     format_correction_prompt,
     parse_structured_output,
 )
+from app.services.provider_reliability import CircuitBreaker, CircuitOpenError
+
+logger = logging.getLogger(__name__)
 
 
 class EVLGemmaProvider(LLMProvider):
@@ -49,6 +57,9 @@ class EVLGemmaProvider(LLMProvider):
         timeout_seconds: float = 180.0,
         client: Any | None = None,
         diagnostic_dir: str | Path | None = None,
+        circuit_breaker: CircuitBreaker | None = None,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        jitter: Callable[[], float] | None = None,
     ) -> None:
         self._api_key = api_key
         self.base_url = base_url
@@ -59,6 +70,12 @@ class EVLGemmaProvider(LLMProvider):
         self._diagnostic_dir = Path(diagnostic_dir) if diagnostic_dir is not None else None
         self._last_generation_call_count = 1
         self._last_format_correction_used = False
+        self._availability: LLMProviderAvailability = (
+            "configured" if self.configured else "unconfigured"
+        )
+        self._circuit_breaker = circuit_breaker or CircuitBreaker()
+        self._sleep = sleep
+        self._jitter = jitter or (lambda: random.uniform(0.0, 0.25))
 
     def _record_invalid_output(
         self,
@@ -113,7 +130,31 @@ class EVLGemmaProvider(LLMProvider):
 
     @property
     def configured(self) -> bool:
-        return bool(self._api_key) or self._client is not None
+        return bool(self.base_url) and (bool(self._api_key) or self._client is not None)
+
+    @property
+    def availability(self) -> LLMProviderAvailability:
+        return self._availability
+
+    @property
+    def availability_message(self) -> str:
+        return {
+            "configured": "Configured; availability has not been checked yet",
+            "unconfigured": "Not configured",
+            "available": "Available",
+            "temporarily_unavailable": "Temporarily unavailable",
+            "authentication_error": "Authentication failed",
+        }[self._availability]
+
+    def _set_availability(self, state: LLMProviderAvailability) -> None:
+        self._availability = state
+        logger.info(
+            "llm_provider_status provider=%s configured=%s model=%s availability=%s",
+            self.provider_id,
+            self.configured,
+            self.model_id,
+            state,
+        )
 
     @property
     def last_generation_call_count(self) -> int:
@@ -126,9 +167,11 @@ class EVLGemmaProvider(LLMProvider):
     def _get_client(self) -> Any:
         if self._client is not None:
             return self._client
-        if not self._api_key:
+        if not self.configured:
+            self._set_availability("unconfigured")
             raise LLMProviderUnavailableError(
-                "EVL Gemma is not configured; set EVL_GEMMA_API_KEY on the backend"
+                "EVL Gemma is not configured; set EVL_GEMMA_API_KEY and "
+                "EVL_GEMMA_BASE_URL on the backend"
             )
         self._client = AsyncOpenAI(
             api_key=self._api_key,
@@ -138,36 +181,82 @@ class EVLGemmaProvider(LLMProvider):
         )
         return self._client
 
-    async def _request(self, *, messages: list[dict[str, str]], max_tokens: int) -> Any:
+    async def _request(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        max_tokens: int,
+        json_mode: bool = True,
+    ) -> Any:
         client = self._get_client()
-        try:
-            return await client.chat.completions.create(
-                model=self.model_id,
-                messages=messages,
-                temperature=0,
-                max_tokens=max_tokens,
-                response_format={"type": "json_object"},
-            )
-        except openai.AuthenticationError as exc:
-            raise LLMAuthenticationError("EVL Gemma authentication failed") from exc
-        except openai.RateLimitError as exc:
-            raise LLMRateLimitError("EVL Gemma rate limit was reached") from exc
-        except (openai.APITimeoutError, TimeoutError) as exc:
-            raise LLMTimeoutError("EVL Gemma extraction timed out") from exc
-        except openai.APIConnectionError as exc:
-            raise LLMProviderUnavailableError("EVL Gemma is unavailable") from exc
-        except openai.APIStatusError as exc:
-            if exc.status_code in {401, 403}:
+        operation_key = (self.provider_id, "generation")
+        request: dict[str, Any] = {
+            "model": self.model_id,
+            "messages": messages,
+            "temperature": 0,
+            "max_tokens": max_tokens,
+        }
+        if json_mode:
+            request["response_format"] = {"type": "json_object"}
+        for attempt in range(2):
+            try:
+                self._circuit_breaker.before_call(operation_key)
+                response = await client.chat.completions.create(**request)
+            except CircuitOpenError as exc:
+                self._set_availability("temporarily_unavailable")
+                raise LLMProviderUnavailableError("EVL Gemma is temporarily unavailable") from exc
+            except openai.AuthenticationError as exc:
+                self._circuit_breaker.record_failure(operation_key, "authentication")
+                self._set_availability("authentication_error")
                 raise LLMAuthenticationError("EVL Gemma authentication failed") from exc
-            if exc.status_code == 429:
-                raise LLMRateLimitError("EVL Gemma rate limit was reached") from exc
-            if exc.status_code in {408, 504}:
+            except openai.APIStatusError as exc:
+                status = exc.status_code
+                if status in {401, 403}:
+                    self._circuit_breaker.record_failure(operation_key, "authentication")
+                    self._set_availability("authentication_error")
+                    raise LLMAuthenticationError("EVL Gemma authentication failed") from exc
+                category = (
+                    "rate_limited"
+                    if status == 429
+                    else "timeout"
+                    if status in {408, 504}
+                    else "server_error"
+                    if status in {500, 502, 503}
+                    else "invalid_response"
+                )
+                if category in {"rate_limited", "timeout", "server_error"} and attempt == 0:
+                    await self._sleep(1.0 + self._jitter())
+                    continue
+                self._circuit_breaker.record_failure(operation_key, category)
+                self._set_availability("temporarily_unavailable")
+                if category == "rate_limited":
+                    raise LLMRateLimitError("EVL Gemma rate limit was reached") from exc
+                if category == "timeout":
+                    raise LLMTimeoutError("EVL Gemma extraction timed out") from exc
+                if category == "server_error":
+                    raise LLMProviderUnavailableError(
+                        "EVL Gemma is temporarily unavailable"
+                    ) from exc
+                self._set_availability("available")
+                raise LLMOutputError("EVL Gemma rejected structured generation") from exc
+            except (openai.APITimeoutError, TimeoutError) as exc:
+                if attempt == 0:
+                    await self._sleep(1.0 + self._jitter())
+                    continue
+                self._circuit_breaker.record_failure(operation_key, "timeout")
+                self._set_availability("temporarily_unavailable")
                 raise LLMTimeoutError("EVL Gemma extraction timed out") from exc
-            if exc.status_code >= 500:
-                raise LLMProviderUnavailableError("EVL Gemma is unavailable") from exc
-            raise LLMOutputError("EVL Gemma rejected structured generation") from exc
-        except OSError as exc:
-            raise LLMProviderUnavailableError("EVL Gemma is unavailable") from exc
+            except (openai.APIConnectionError, OSError) as exc:
+                if attempt == 0:
+                    await self._sleep(1.0 + self._jitter())
+                    continue
+                self._circuit_breaker.record_failure(operation_key, "network_error")
+                self._set_availability("temporarily_unavailable")
+                raise LLMProviderUnavailableError("EVL Gemma is temporarily unavailable") from exc
+            self._circuit_breaker.record_success(operation_key)
+            self._set_availability("available")
+            return response
+        raise LLMProviderUnavailableError("EVL Gemma is temporarily unavailable")
 
     def _content_from_response(
         self,
@@ -310,6 +399,38 @@ class EVLGemmaProvider(LLMProvider):
                 correction_attempted=True,
             )
             raise LLMOutputError("EVL Gemma structured-output correction failed") from exc
+
+    async def generate_text(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        max_output_tokens: int,
+        context: LLMRequestContext | None = None,
+    ) -> str:
+        self._last_generation_call_count = 1
+        self._last_format_correction_used = False
+        response = await self._request(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            max_tokens=max_output_tokens,
+            json_mode=False,
+        )
+        content, finish_reason = self._content_from_response(
+            response, context=context, attempt="original"
+        )
+        if str(finish_reason).casefold() == "length":
+            self._record_invalid_output(
+                context=context,
+                raw_content=content,
+                envelope_type="truncated_output",
+                finish_reason=finish_reason,
+                parse_error="output_budget_exceeded",
+            )
+            raise LLMOutputBudgetExceeded("EVL Gemma output budget was exceeded")
+        return content
 
     async def aclose(self) -> None:
         if self._client is not None and self._owns_client:
