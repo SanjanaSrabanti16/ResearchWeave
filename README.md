@@ -1,10 +1,6 @@
-<table align="center">
-  <tr>
-    <td align="center" bgcolor="#ffffff">
-      <img src="frontend/src/assets/researchWeave_Logo.png" alt="ResearchWeave" width="460">
-    </td>
-  </tr>
-</table>
+<p align="center">
+  <img src="frontend/src/assets/researchWeave_Logo_readme.png" alt="ResearchWeave" width="460">
+</p>
 
 <p align="center"><strong>Explore, understand, and connect scholarly research.</strong></p>
 
